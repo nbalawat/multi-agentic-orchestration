@@ -1,45 +1,45 @@
-/* Global CSS Theme - Orchestrator 3 Stream */
-/* Based on dark theme with cyan/teal accents */
+/* Global CSS Theme - RAPIDS Meta-Orchestrator */
+/* Deloitte-inspired dark theme: Green #86BC24, Black #000, Blue #1076A8 */
 
 :root {
-  /* Base Colors */
+  /* Base Colors — Deloitte Black */
   --bg-primary: #0a0a0a;
-  --bg-secondary: #1a1a1a;
-  --bg-tertiary: #2a2a2a;
-  --bg-quaternary: #1e1e1e;
+  --bg-secondary: #141414;
+  --bg-tertiary: #1e1e1e;
+  --bg-quaternary: #181818;
 
   /* Text Colors */
-  --text-primary: #ffffff;
+  --text-primary: #f0f0f0;
   --text-secondary: #b0b0b0;
   --text-muted: #6b7280;
   --text-dim: #4b5563;
 
-  /* Accent Colors */
-  --accent-primary: #06b6d4; /* Cyan */
-  --accent-secondary: #14b8a6; /* Teal */
-  --accent-hover: #0891b2;
+  /* Accent Colors — Deloitte Green + Blue */
+  --accent-primary: #86BC24; /* Deloitte Green */
+  --accent-secondary: #1076A8; /* Deloitte Blue */
+  --accent-hover: #6fa01e; /* Darker green on hover */
 
-  /* Agent Sidebar Colors */
-  --agent-bg: #2d1b4e; /* Purple tint */
-  --agent-hover: #3d2b5e;
-  --agent-active: #a855f7; /* Purple accent */
+  /* Agent Sidebar Colors — Green-tinted */
+  --agent-bg: #1a2a14; /* Dark green tint */
+  --agent-hover: #243618;
+  --agent-active: #86BC24; /* Deloitte Green */
 
   /* Status Colors */
-  --status-success: #10b981;
+  --status-success: #86BC24; /* Deloitte Green */
   --status-error: #ef4444;
   --status-warning: #f59e0b;
-  --status-info: #3b82f6;
-  --status-debug: #8b5cf6;
+  --status-info: #1076A8; /* Deloitte Blue */
+  --status-debug: #6b7280;
 
   /* Border & Divider */
-  --border-color: #333333;
-  --border-light: #404040;
-  --divider: #2a2a2a;
+  --border-color: #2a2a2a;
+  --border-light: #383838;
+  --divider: #222222;
 
   /* Chat Bubbles */
-  --chat-user-bg: #1e3a5f;
-  --chat-orch-bg: #2a2a2a;
-  --chat-input-bg: #1a1a1a;
+  --chat-user-bg: #0d2e4a; /* Deloitte Blue tint */
+  --chat-orch-bg: #1e1e1e;
+  --chat-input-bg: #141414;
 
   /* Shadows */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);

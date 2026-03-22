@@ -113,7 +113,7 @@ function formatTime(timestamp: Date | string): string {
   padding: 2px 8px;
   border-radius: 4px;
   background: rgba(147, 51, 234, 0.15);
-  color: #a855f7;
+  color: #1076A8;
   border: 1px solid rgba(147, 51, 234, 0.3);
 }
 

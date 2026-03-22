@@ -2,7 +2,7 @@
   <header class="app-header">
     <div class="header-content">
       <div class="header-title">
-        <h1>MULTI-AGENT ORCHESTRATION</h1>
+        <h1><span class="brand-dot">.</span>RAPIDS ORCHESTRATOR</h1>
         <div class="header-subtitle-group">
           <span class="header-subtitle">LIVE LOG STREAM</span>
           <div class="connection-status">
@@ -96,6 +96,13 @@ const store = useOrchestratorStore();
   letter-spacing: 0.05em;
   color: var(--text-primary);
   margin: 0;
+}
+
+.brand-dot {
+  color: #86BC24;
+  font-size: 1.4rem;
+  font-weight: 900;
+  margin-right: -2px;
 }
 
 .header-subtitle {

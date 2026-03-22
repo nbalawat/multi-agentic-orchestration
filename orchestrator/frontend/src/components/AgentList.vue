@@ -506,7 +506,7 @@ const getPulseColorValue = (agent: Agent): string => {
 .all-agents-btn {
   width: 100%;
   padding: 0.875rem;
-  background: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+  background: linear-gradient(135deg, #a78bfa 0%, #1076A8 100%);
   border: none;
   border-radius: 8px;
   cursor: pointer;
@@ -708,7 +708,7 @@ const getPulseColorValue = (agent: Agent): string => {
 
 .context-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #06b6d4 0%, #0891b2 100%);
+  background: linear-gradient(90deg, #86BC24 0%, #5a8a19 100%);
   border-radius: 4px;
   transition: width 0.3s ease;
 }
@@ -772,7 +772,7 @@ const getPulseColorValue = (agent: Agent): string => {
 
 .counter-thinking {
   background: rgba(168, 85, 247, 0.1);
-  color: #a855f7;
+  color: #1076A8;
   border-color: rgba(168, 85, 247, 0.2);
 }
 

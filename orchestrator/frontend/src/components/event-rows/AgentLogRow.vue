@@ -349,7 +349,7 @@ function formatTime(timestamp: Date | string): string {
 
 .category-thinking {
   background: rgba(168, 85, 247, 0.15);
-  color: #a855f7;
+  color: #1076A8;
   border: 1px solid rgba(168, 85, 247, 0.3);
 }
 

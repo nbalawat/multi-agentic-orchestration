@@ -152,7 +152,7 @@ function formatTime(timestamp: Date | string | null | undefined): string {
 }
 
 .category-thinking {
-  border-left-color: #a855f7;
+  border-left-color: #1076A8;
 }
 
 /* Line number */
@@ -193,7 +193,7 @@ function formatTime(timestamp: Date | string | null | undefined): string {
 /* THINKING badge */
 .communication-badge.category-thinking {
   background: rgba(168, 85, 247, 0.15);
-  color: #a855f7;
+  color: #1076A8;
   border: 1px solid rgba(168, 85, 247, 0.3);
 }
 
@@ -230,7 +230,7 @@ function formatTime(timestamp: Date | string | null | undefined): string {
 
 .type-agent {
   background: rgba(6, 182, 212, 0.15);
-  color: #06b6d4;
+  color: #86BC24;
 }
 
 .arrow {
@@ -276,7 +276,7 @@ function formatTime(timestamp: Date | string | null | undefined): string {
 }
 
 .from-agent {
-  border-left: 3px solid #06b6d4;
+  border-left: 3px solid #86BC24;
 }
 
 /* Markdown content styles in message bubble */

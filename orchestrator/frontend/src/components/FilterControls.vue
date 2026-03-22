@@ -242,12 +242,12 @@ const getCategoryEmoji = (category: string): string => {
 
 .qf-thinking {
   background: rgba(168, 85, 247, 0.15);
-  color: #a855f7;
+  color: #1076A8;
   border-color: rgba(168, 85, 247, 0.3);
 }
 
 .qf-thinking.active {
-  background: #a855f7;
+  background: #1076A8;
   color: white;
 }
 

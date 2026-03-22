@@ -391,7 +391,7 @@ const exportFileActivity = () => {
     rgba(6, 182, 212, 0.2),
     rgba(0, 0, 0, 0.1)
   );
-  border-left-color: var(--status-info, #06b6d4);
+  border-left-color: var(--status-info, #86BC24);
   border-left-width: 3px;
   border-radius: 4px;
 }
@@ -477,7 +477,7 @@ const exportFileActivity = () => {
 .section-count {
   padding: 0.25rem 0.75rem;
   background: rgba(6, 182, 212, 0.2);
-  color: var(--status-info, #06b6d4);
+  color: var(--status-info, #86BC24);
   border-radius: 12px;
   font-size: 0.875rem;
   font-weight: 600;
@@ -841,7 +841,7 @@ const exportFileActivity = () => {
 .export-button {
   padding: 0.5rem 1rem;
   background: rgba(6, 182, 212, 0.2);
-  color: var(--status-info, #06b6d4);
+  color: var(--status-info, #86BC24);
   border: 1px solid rgba(6, 182, 212, 0.3);
   border-radius: 6px;
   cursor: pointer;

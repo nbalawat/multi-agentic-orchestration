@@ -78,7 +78,7 @@ function formatTime(timestamp: string | Date) {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #8b5cf6;
+  color: #1076A8;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -116,7 +116,7 @@ function formatTime(timestamp: string | Date) {
   background: rgba(139, 92, 246, 0.15);
   border: 1px solid rgba(139, 92, 246, 0.3);
   border-radius: 6px;
-  color: #8b5cf6;
+  color: #1076A8;
   font-size: 0.7rem;
   font-weight: 600;
   cursor: pointer;

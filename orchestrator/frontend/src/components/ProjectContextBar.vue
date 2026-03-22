@@ -126,11 +126,11 @@ onMounted(() => {
   border: 1px solid rgba(34, 197, 94, 0.3);
 }
 
-.phase-research { background: rgba(168, 85, 247, 0.15); color: #a855f7; border-color: rgba(168, 85, 247, 0.3); }
+.phase-research { background: rgba(168, 85, 247, 0.15); color: #1076A8; border-color: rgba(168, 85, 247, 0.3); }
 .phase-analysis { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border-color: rgba(59, 130, 246, 0.3); }
 .phase-plan { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3); }
 .phase-implement { background: rgba(34, 197, 94, 0.15); color: #22c55e; border-color: rgba(34, 197, 94, 0.3); }
-.phase-deploy { background: rgba(6, 182, 212, 0.15); color: #06b6d4; border-color: rgba(6, 182, 212, 0.3); }
+.phase-deploy { background: rgba(6, 182, 212, 0.15); color: #86BC24; border-color: rgba(6, 182, 212, 0.3); }
 .phase-sustain { background: rgba(236, 72, 153, 0.15); color: #ec4899; border-color: rgba(236, 72, 153, 0.3); }
 
 .archetype-badge {
