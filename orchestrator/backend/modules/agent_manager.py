@@ -1350,14 +1350,57 @@ class AgentManager:
                         "prompt": feature_prompt,
                     })
 
+                # Create git worktrees for parallel isolation
+                from .git_worktree import GitWorktreeManager
+                git_mgr = None
+                try:
+                    git_mgr = GitWorktreeManager(repo_path)
+                    git_mgr.ensure_git_repo()
+                    self.logger.info(f"GitWorktreeManager initialized for {repo_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to init GitWorktreeManager: {e}. Agents will share main repo.")
+
                 # Launch all agents in parallel using asyncio tasks
                 async def _launch_builder(entry):
-                    """Create and dispatch a single builder agent."""
+                    """Create and dispatch a single builder agent with worktree isolation."""
                     try:
+                        # Create git worktree for this feature
+                        worktree_path = None
+                        worktree_branch = None
+                        if git_mgr:
+                            try:
+                                wt_path = git_mgr.create_worktree(entry["feature_id"])
+                                worktree_path = str(wt_path)
+                                worktree_branch = f"rapids/{entry['feature_id']}"
+                                entry["worktree"] = worktree_path
+                                entry["branch"] = worktree_branch
+                                self.logger.info(f"Created worktree for '{entry['feature_id']}' at {worktree_path}")
+
+                                # Add worktree info to the prompt
+                                entry["prompt"] += (
+                                    f"\n\n## Git Worktree\n"
+                                    f"You are working in an isolated git worktree on branch `{worktree_branch}`.\n"
+                                    f"Working directory: `{worktree_path}`\n"
+                                    f"Commit your changes to this branch when done.\n"
+                                )
+                            except Exception as wt_err:
+                                self.logger.warning(f"Worktree creation failed for '{entry['feature_id']}': {wt_err}")
+
+                        # Get archetype for plugin loading
+                        archetype = project_info.get("archetype", "")
+                        phase_meta = {
+                            "phase": "implement",
+                            "project_id": project_id,
+                            "archetype": archetype,
+                        }
+                        if worktree_path:
+                            phase_meta["worktree_path"] = worktree_path
+
                         result = await self.create_agent(
                             name=entry["agent"],
                             system_prompt=entry["prompt"],
                             model="sonnet",
+                            phase_metadata=phase_meta,
                         )
                         entry["status"] = "created"
 
@@ -1850,10 +1893,13 @@ class AgentManager:
 
             # Only add can_use_tool for interactive agents (not builder agents)
             # Builder agents (name starts with "builder-") run autonomously
+            # Use worktree path as cwd if available (for parallel feature isolation)
+            agent_cwd = metadata.get("worktree_path", self.working_dir)
+
             agent_options = {
                 "system_prompt": system_prompt,
                 "model": model or config.DEFAULT_AGENT_MODEL,
-                "cwd": self.working_dir,
+                "cwd": agent_cwd,
                 "hooks": hooks_dict,
                 "allowed_tools": tools_to_use,
                 "disallowed_tools": default_disallowed,
@@ -1861,6 +1907,8 @@ class AgentManager:
                 "env": env_vars,
                 "setting_sources": ["user", "project"],  # Required for SDK skill auto-discovery
             }
+            if agent_cwd != self.working_dir:
+                self.logger.info(f"Agent '{name}' will work in worktree: {agent_cwd}")
 
             # Load plugin for SDK auto-discovery of skills, agents, commands
             # This makes plugin skills invocable by the agent (e.g. /greenfield:web-research)
