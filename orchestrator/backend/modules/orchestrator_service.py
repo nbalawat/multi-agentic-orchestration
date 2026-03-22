@@ -219,6 +219,23 @@ class OrchestratorService:
             # Replace placeholder
             prompt_text = prompt_text.replace("{{SUBAGENT_MAP}}", template_map)
 
+        # Inject PLUGIN_CATALOG — dynamic listing of all available archetype plugins
+        if "{{PLUGIN_CATALOG}}" in prompt_text:
+            plugin_registry = getattr(self, 'plugin_registry', None)
+            if plugin_registry:
+                catalog = plugin_registry.build_plugin_catalog()
+                prompt_text = prompt_text.replace("{{PLUGIN_CATALOG}}", catalog)
+                self.logger.info(f"Injected PLUGIN_CATALOG ({len(plugin_registry.list_all())} plugins)")
+            else:
+                prompt_text = prompt_text.replace("{{PLUGIN_CATALOG}}", "No plugins discovered.")
+        elif not any(p in prompt_text for p in ["{{PLUGIN_CATALOG}}"]):
+            # Auto-append plugin catalog even if no placeholder exists
+            plugin_registry = getattr(self, 'plugin_registry', None)
+            if plugin_registry and plugin_registry.list_all():
+                catalog = plugin_registry.build_plugin_catalog()
+                prompt_text += f"\n\n{catalog}"
+                self.logger.info(f"Auto-appended PLUGIN_CATALOG to system prompt")
+
         # Replace RAPIDS context placeholders with live data
         context_blocks = self._build_context_blocks()
         for placeholder, value in context_blocks.items():

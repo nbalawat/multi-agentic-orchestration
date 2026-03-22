@@ -1,0 +1,93 @@
+{
+  "name": "reverse-engineering",
+  "archetype": "reverse-engineering",
+  "description": "Plugin for reverse-engineering undocumented or poorly documented codebases. Provides a full RAPIDS workflow for code archaeology, architecture recovery, and comprehensive documentation generation — transforming opaque legacy systems into understood, maintainable assets.",
+  "version": "1.0.0",
+  "phases": {
+    "research": {
+      "entry_criteria": [],
+      "exit_criteria": [
+        "codebase_inventory_complete",
+        "entry_points_identified",
+        "external_dependencies_catalogued",
+        "data_stores_identified",
+        "deployment_artifacts_located",
+        "subject_matter_experts_interviewed"
+      ],
+      "default_agents": ["code-detective"],
+      "skills": ["code-archaeology", "dependency-tracing", "runtime-behavior-analysis", "stakeholder-interview"],
+      "prompt_supplement": "This project involves reverse-engineering a codebase with little or no existing documentation. Approach the codebase like an archaeologist: start with the outermost observable artifacts (entry points, API surfaces, configuration files, deployment scripts) and work inward. Catalogue all external dependencies and their versions. Identify all data stores and their schemas. Interview any available subject matter experts or original authors to capture institutional knowledge before it is lost. Do not assume any naming convention, pattern, or structure is intentional until verified — document ambiguities explicitly."
+    },
+    "analysis": {
+      "entry_criteria": [
+        "research_complete"
+      ],
+      "exit_criteria": [
+        "architecture_diagram_produced",
+        "component_responsibilities_documented",
+        "data_flow_diagrams_produced",
+        "key_algorithms_identified",
+        "implicit_contracts_documented",
+        "known_unknowns_listed"
+      ],
+      "default_agents": ["system-mapper"],
+      "skills": ["architecture-recovery", "data-flow-analysis", "call-graph-analysis", "pattern-recognition"],
+      "prompt_supplement": "Reconstruct the system architecture from the artifacts gathered during research. Produce component diagrams, data flow diagrams, and sequence diagrams for all critical paths. Document the responsibility of each major component and module in plain language. Identify key algorithms and non-obvious logic — these are high-value documentation targets. Explicitly list all implicit contracts (undocumented assumptions between components, magic constants, order dependencies). Maintain a 'known unknowns' list for areas that could not be fully understood without runtime observation or additional expertise."
+    },
+    "plan": {
+      "entry_criteria": [
+        "analysis_complete"
+      ],
+      "exit_criteria": [
+        "spec_exists",
+        "feature_dag_valid",
+        "documentation_sections_scoped",
+        "documentation_priorities_set",
+        "acceptance_criteria_defined"
+      ],
+      "default_agents": ["documentation-planner"],
+      "skills": ["documentation-scoping", "audience-analysis", "dependency-mapping", "spec-writing"],
+      "prompt_supplement": "Plan the documentation artifacts to be produced. Decompose the documentation work into discrete, independently completable sections: architecture overview, component references, API documentation, data dictionary, operational runbooks, and developer onboarding guides. Prioritize sections by risk (start with the least understood, highest-change-frequency areas). Build a dependency DAG — architecture overview must precede component references, data dictionary must precede API documentation. Each documentation spec must define its target audience, required depth, and acceptance criteria for completeness and accuracy."
+    },
+    "implement": {
+      "entry_criteria": [
+        "plan_complete",
+        "feature_dag_valid"
+      ],
+      "exit_criteria": [
+        "all_documentation_sections_complete",
+        "architecture_docs_reviewed",
+        "api_docs_verified_against_code",
+        "runbooks_validated",
+        "known_unknowns_resolved_or_escalated"
+      ],
+      "default_agents": ["documentation-writer"],
+      "skills": ["technical-writing", "diagram-generation", "api-doc-generation", "runbook-authoring"],
+      "prompt_supplement": "Write each documentation section using a fresh-context agent that receives the relevant system-mapper analysis artifacts and the section spec. Every factual claim in the documentation must be traceable to a specific code location or verified behavior — cite file paths and line numbers where relevant. Do not paper over gaps with vague language; instead flag unresolved areas explicitly with a 'Needs Verification' callout. Verify API documentation against the actual code signatures before marking a section complete. Resolve or formally escalate every item on the known-unknowns list."
+    },
+    "deploy": {
+      "entry_criteria": [
+        "implement_complete"
+      ],
+      "exit_criteria": [
+        "documentation_published",
+        "documentation_site_accessible",
+        "search_indexed",
+        "stakeholders_notified",
+        "feedback_channel_established"
+      ],
+      "default_agents": ["docs-publisher"],
+      "skills": ["documentation-site-deployment", "search-indexing", "version-control-integration", "stakeholder-communication"],
+      "prompt_supplement": "Publish the completed documentation to a durable, searchable, version-controlled location accessible to all stakeholders. Link documentation to the source code repository so readers can navigate from a doc section directly to the relevant code. Notify all identified stakeholders and consumers of the documentation. Establish a feedback channel (issue tracker, annotation tool, or review process) so inaccuracies discovered after publication can be reported and corrected promptly."
+    },
+    "sustain": {
+      "entry_criteria": [
+        "deploy_complete"
+      ],
+      "exit_criteria": [],
+      "default_agents": ["knowledge-maintainer"],
+      "skills": ["documentation-drift-detection", "change-tracking", "review-scheduling", "onboarding-support"],
+      "prompt_supplement": "Establish a process to keep the documentation accurate as the codebase evolves. Configure automated checks that detect when documented code locations change (function signatures, API endpoints, configuration keys) and file documentation drift alerts. Schedule periodic review cycles for the highest-change-frequency sections. Integrate documentation updates into the development workflow so new features and changes trigger a documentation update checklist. Track documentation coverage over time and report on areas that fall below the minimum coverage threshold."
+    }
+  }
+}

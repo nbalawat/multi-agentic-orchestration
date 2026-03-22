@@ -1383,6 +1383,80 @@ class AgentManager:
                     "is_error": True,
                 }
 
+        # ═══════════════════════════════════════════════════════════
+        # PLUGIN INTROSPECTION TOOL
+        # ═══════════════════════════════════════════════════════════
+
+        @tool(
+            "list_plugin_capabilities",
+            "List all agents, skills, commands, workflows, and phases available in a plugin. "
+            "Use plugin_name to inspect a specific plugin, or omit to list all plugins. "
+            "Helps you understand what resources each archetype plugin provides.",
+            {"plugin_name": str},
+        )
+        async def list_plugin_capabilities_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for inspecting plugin capabilities"""
+            try:
+                plugin_registry = getattr(self, 'plugin_registry', None)
+                if plugin_registry is None:
+                    return {
+                        "content": [{"type": "text", "text": "Plugin registry not initialized."}],
+                        "is_error": True,
+                    }
+
+                plugin_name = args.get("plugin_name", "")
+
+                if plugin_name:
+                    # Inspect specific plugin
+                    caps = plugin_registry.list_capabilities(plugin_name)
+                    if caps is None:
+                        available = [p.name for p in plugin_registry.list_all()]
+                        return {
+                            "content": [{"type": "text", "text": f"Plugin '{plugin_name}' not found. Available: {', '.join(available)}"}],
+                            "is_error": True,
+                        }
+
+                    lines = [
+                        f"# Plugin: {caps.name} (v{caps.version})",
+                        f"**Archetype:** {caps.archetype}",
+                        f"**Description:** {caps.description}",
+                        f"**Plugin Directory:** `{caps.plugin_dir}`",
+                        "",
+                        "## Phases",
+                    ]
+                    for phase in caps.phases:
+                        phase_cfg = plugin_registry.get_phase_config(plugin_name, phase)
+                        agents_str = ", ".join(phase_cfg.default_agents) if phase_cfg else "none"
+                        lines.append(f"- **{phase}**: agents=[{agents_str}]")
+
+                    if caps.agents:
+                        lines.append("\n## Agents")
+                        for a in caps.agents:
+                            lines.append(f"- **{a['name']}** ({a['model']}): {a['description']}")
+
+                    if caps.commands:
+                        lines.append("\n## Commands")
+                        for c in caps.commands:
+                            lines.append(f"- `/{c}`")
+
+                    if caps.workflows:
+                        lines.append("\n## Workflows")
+                        for w in caps.workflows:
+                            lines.append(f"- `{w}`")
+
+                    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+                else:
+                    # List all plugins
+                    catalog = plugin_registry.build_plugin_catalog()
+                    return {"content": [{"type": "text", "text": catalog}]}
+
+            except Exception as e:
+                self.logger.error(f"list_plugin_capabilities error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
         return [
             create_agent_tool,
             list_agents_tool,
@@ -1405,6 +1479,7 @@ class AgentManager:
             create_feature_tool,
             get_feature_dag_status_tool,
             execute_ready_features_tool,
+            list_plugin_capabilities_tool,
         ]
 
     def _create_agent_can_use_tool(self, agent_id: uuid.UUID, agent_name: str):
@@ -1481,9 +1556,13 @@ class AgentManager:
 
     def build_phase_agent_prompt(self, phase: str, project_id: str) -> str:
         """
-        Build a comprehensive system prompt for a phase-specific sub-agent.
+        Build a comprehensive system prompt for a phase-specific agent.
 
-        Combines: phase prompt template + plugin agent template + plugin workflow guidance + project context.
+        Strategy (plugin-first):
+        1. Look up project's plugin via PluginRegistry
+        2. Use plugin's agent template as PRIMARY prompt (if available)
+        3. Fall back to generic phase prompt template
+        4. Inject project context and workflow guidance
 
         Args:
             phase: RAPIDS phase (research, analysis, plan, implement, deploy, sustain)
@@ -1494,18 +1573,11 @@ class AgentManager:
         """
         parts = []
 
-        # 1. Load the phase prompt template
-        phase_prompt_path = Path(__file__).parent.parent / "prompts" / "phase_prompts" / f"{phase}_prompt.md"
-        if phase_prompt_path.exists():
-            phase_prompt = phase_prompt_path.read_text()
-        else:
-            phase_prompt = f"You are executing the **{phase.capitalize()}** phase of the RAPIDS workflow."
-            self.logger.warning(f"Phase prompt not found: {phase_prompt_path}")
-
-        # 2. Get project context for template substitution
+        # ── 1. Resolve project context ──
         project_name = "unknown"
         repo_path = ""
         archetype = ""
+        plugin_name = ""
         rapids_dir = ""
         project_context_text = "No project context available."
 
@@ -1514,65 +1586,72 @@ class AgentManager:
             project_name = ctx.get("name", "unknown")
             repo_path = ctx.get("repo_path", "")
             archetype = ctx.get("archetype", "")
+            plugin_name = ctx.get("plugin_id", archetype)
             rapids_dir = f"{repo_path}/.rapids"
 
             project_context_text = (
                 f"**Project:** {project_name}\n"
                 f"**Repository:** `{repo_path}`\n"
                 f"**Archetype:** {archetype}\n"
+                f"**Plugin:** {plugin_name}\n"
                 f"**RAPIDS Directory:** `{rapids_dir}`\n"
                 f"**Phase Artifacts Directory:** `{rapids_dir}/{phase}/`\n"
                 f"\nAll artifacts MUST be saved to `{rapids_dir}/{phase}/`."
             )
 
-        # Replace template variables in phase prompt
+        # ── 2. Try plugin agent template FIRST (plugin-driven) ──
+        plugin_agent_used = False
+        plugin_registry = getattr(self, 'plugin_registry', None)
+
+        if plugin_registry and plugin_name:
+            # Get the plugin's default agents for this phase
+            phase_agents = plugin_registry.get_phase_agents(plugin_name, phase)
+            if phase_agents:
+                # Use the first (primary) agent template
+                agent_tmpl = phase_agents[0]
+                if agent_tmpl.system_prompt:
+                    parts.append(agent_tmpl.system_prompt)
+                    parts.append("\n\n---\n\n")
+                    plugin_agent_used = True
+                    self.logger.info(
+                        f"Using plugin agent template '{agent_tmpl.name}' from '{plugin_name}' for {phase} phase"
+                    )
+
+        # ── 3. Load generic phase prompt (primary if no plugin agent, supplement if plugin used) ──
+        phase_prompt_path = Path(__file__).parent.parent / "prompts" / "phase_prompts" / f"{phase}_prompt.md"
+        if phase_prompt_path.exists():
+            phase_prompt = phase_prompt_path.read_text()
+        else:
+            phase_prompt = f"You are executing the **{phase.capitalize()}** phase of the RAPIDS workflow."
+            self.logger.warning(f"Phase prompt not found: {phase_prompt_path}")
+
+        # Substitute template variables
         phase_prompt = phase_prompt.replace("{{PROJECT_NAME}}", project_name)
         phase_prompt = phase_prompt.replace("{{PROJECT_CONTEXT}}", project_context_text)
 
-        # 3. Load plugin workflow guidance as PLUGIN_SUPPLEMENT
+        # ── 4. Load workflow guidance from plugin ──
         plugin_supplement = ""
-        if hasattr(self, 'plugin_loader') and self.plugin_loader and archetype:
+        if plugin_registry and plugin_name:
             try:
-                workflow_path = self.plugin_loader.plugins_dir / archetype / "workflows" / f"{phase}-workflow.md"
-                if workflow_path.exists():
+                workflow_path = plugin_registry.get_phase_workflow_path(plugin_name, phase)
+                if workflow_path and workflow_path.exists():
                     workflow_text = workflow_path.read_text()
                     plugin_supplement = (
-                        f"\n## Guided Workflow ({archetype} archetype)\n\n"
+                        f"\n## Guided Workflow ({plugin_name} archetype)\n\n"
                         f"Follow this workflow structure for the {phase} phase:\n\n"
                         f"{workflow_text}"
                     )
                     self.logger.info(f"Loaded workflow guidance from {workflow_path}")
             except Exception as e:
-                self.logger.warning(f"Failed to load workflow for {phase}/{archetype}: {e}")
+                self.logger.warning(f"Failed to load workflow for {phase}/{plugin_name}: {e}")
+
+        # Also inject the plugin's prompt_supplement if available
+        if plugin_registry and plugin_name:
+            phase_config = plugin_registry.get_phase_config(plugin_name, phase)
+            if phase_config and phase_config.prompt_supplement:
+                plugin_supplement += f"\n\n## Archetype Context ({plugin_name})\n\n{phase_config.prompt_supplement}"
 
         phase_prompt = phase_prompt.replace("{{PLUGIN_SUPPLEMENT}}", plugin_supplement)
-
-        # 4. Load plugin agent template if available (prepend its system prompt)
-        phase_agent_map = {
-            "research": "researcher",
-            "analysis": "architect",
-            "plan": "planner",
-            "implement": "feature-builder",
-            "deploy": "deployer",
-            "sustain": "monitor",
-        }
-        agent_template_name = phase_agent_map.get(phase, "")
-
-        if hasattr(self, 'plugin_loader') and self.plugin_loader and archetype and agent_template_name:
-            try:
-                agent_path = self.plugin_loader.plugins_dir / archetype / "agents" / f"{agent_template_name}.md"
-                if agent_path.exists():
-                    agent_text = agent_path.read_text()
-                    # Strip YAML frontmatter
-                    if agent_text.startswith("---"):
-                        end_idx = agent_text.find("---", 3)
-                        if end_idx != -1:
-                            agent_text = agent_text[end_idx + 3:].strip()
-                    parts.append(agent_text)
-                    parts.append("\n\n---\n\n")
-                    self.logger.info(f"Prepended plugin agent template: {agent_template_name}")
-            except Exception as e:
-                self.logger.warning(f"Failed to load agent template {agent_template_name}: {e}")
 
         parts.append(phase_prompt)
 

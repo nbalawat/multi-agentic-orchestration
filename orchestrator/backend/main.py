@@ -47,7 +47,7 @@ from modules.rapids_database import (
     init_project_phases as db_init_project_phases,
 )
 from modules.workspace_manager import WorkspaceManager
-from modules.plugin_loader import PluginLoader
+from modules.plugin_loader import PluginLoader, PluginRegistry
 from modules.feature_dag import FeatureDAG
 from modules.project_state import ProjectState
 from modules.phase_engine import PhaseEngine
@@ -177,24 +177,36 @@ async def lifespan(app: FastAPI):
     app.state.agent_manager = agent_manager
 
     # Initialize RAPIDS workspace/plugin infrastructure
-    logger.info("Initializing PluginLoader and WorkspaceManager...")
-    plugins_dir = Path(config.get_working_dir()) / ".claude" / "rapids-plugins"
+    logger.info("Initializing PluginLoader, PluginRegistry, and WorkspaceManager...")
+    # Use project root for plugin discovery (BACKEND_DIR -> orchestrator/backend -> project root)
+    project_root = config.BACKEND_DIR.parent.parent
+    plugins_dir = project_root / ".claude" / "rapids-plugins"
+    logger.info(f"Plugin discovery path: {plugins_dir}")
     plugin_loader = PluginLoader(plugins_dir=plugins_dir)
     plugin_loader.discover_plugins()
+
+    # Create PluginRegistry (multi-plugin support with capability enumeration)
+    plugin_registry = PluginRegistry(plugins_dir)
+    discovered = plugin_registry.list_all()
+    logger.info(f"PluginRegistry discovered {len(discovered)} plugins: {[p.name for p in discovered]}")
+
     workspace_manager = WorkspaceManager(plugin_loader=plugin_loader)
     app.state.plugin_loader = plugin_loader
+    app.state.plugin_registry = plugin_registry
     app.state.workspace_manager = workspace_manager
-    logger.success("PluginLoader and WorkspaceManager initialized")
+    logger.success("PluginLoader, PluginRegistry, and WorkspaceManager initialized")
 
     # Wire workspace/plugin context into orchestrator service for system prompt injection
     orchestrator_service.workspace_manager = workspace_manager
     orchestrator_service.plugin_loader = plugin_loader
-    logger.info("Wired workspace_manager + plugin_loader into OrchestratorService for context injection")
+    orchestrator_service.plugin_registry = plugin_registry
+    logger.info("Wired workspace_manager + plugin_loader + plugin_registry into OrchestratorService")
 
     # Also wire into agent_manager for phase-aware agent creation
     agent_manager.workspace_manager = workspace_manager
     agent_manager.plugin_loader = plugin_loader
-    logger.info("Wired workspace_manager + plugin_loader into AgentManager")
+    agent_manager.plugin_registry = plugin_registry
+    logger.info("Wired workspace_manager + plugin_loader + plugin_registry into AgentManager")
 
     logger.success("Backend initialization complete")
 

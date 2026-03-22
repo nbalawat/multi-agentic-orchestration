@@ -1,0 +1,94 @@
+{
+  "name": "data-modernization",
+  "archetype": "data-modernization",
+  "description": "Plugin for data modernization projects including database migration, schema evolution, and ETL pipeline development. Provides a full RAPIDS workflow optimized for moving data assets from legacy systems to modern platforms with zero data loss and minimal downtime.",
+  "version": "1.0.0",
+  "phases": {
+    "research": {
+      "entry_criteria": [],
+      "exit_criteria": [
+        "source_systems_inventoried",
+        "data_volumes_documented",
+        "data_quality_baseline_captured",
+        "business_rules_extracted",
+        "downstream_consumers_identified",
+        "compliance_requirements_documented"
+      ],
+      "default_agents": ["data-archeologist"],
+      "skills": ["schema-profiling", "data-lineage-tracing", "business-rule-extraction", "stakeholder-interview"],
+      "prompt_supplement": "This is a data modernization project. Research must deeply catalog all source systems, their schemas, data volumes, data quality characteristics, and documented (or undocumented) business rules embedded in existing ETL logic. Identify all downstream consumers, SLAs, and compliance obligations (PII, GDPR, retention policies) before any migration design begins. Capture a full data quality baseline to measure against post-migration."
+    },
+    "analysis": {
+      "entry_criteria": [
+        "research_complete"
+      ],
+      "exit_criteria": [
+        "target_schema_designed",
+        "data_mapping_document_exists",
+        "transformation_rules_defined",
+        "data_quality_rules_defined",
+        "migration_strategy_selected",
+        "rollback_plan_documented"
+      ],
+      "default_agents": ["schema-designer"],
+      "skills": ["schema-design", "data-modeling", "transformation-rule-authoring", "technology-evaluation"],
+      "prompt_supplement": "Design the target schema and data model optimized for the destination platform. Produce a comprehensive field-level data mapping document covering all source-to-target transformations, type coercions, and business rule translations. Select a migration strategy (big-bang, strangler-fig, dual-write, or CDC-based) with explicit justification. Document a rollback plan for every major migration stage. Identify data quality rules that must hold in the target system."
+    },
+    "plan": {
+      "entry_criteria": [
+        "analysis_complete"
+      ],
+      "exit_criteria": [
+        "spec_exists",
+        "feature_dag_valid",
+        "feature_specs_exist",
+        "migration_phases_sequenced",
+        "acceptance_criteria_defined",
+        "data_validation_checkpoints_defined"
+      ],
+      "default_agents": ["migration-planner"],
+      "skills": ["migration-sequencing", "dependency-mapping", "spec-writing", "risk-planning"],
+      "prompt_supplement": "Decompose the migration into discrete, independently verifiable migration units (tables, domains, or pipeline stages). Build a dependency DAG that respects referential integrity order and enables safe incremental execution. Each migration unit spec must include: source query, transformation logic, target DDL, row count reconciliation checks, data quality assertions, and rollback procedure. Define go/no-go acceptance criteria for each phase gate before production cutover."
+    },
+    "implement": {
+      "entry_criteria": [
+        "plan_complete",
+        "feature_dag_valid"
+      ],
+      "exit_criteria": [
+        "all_migration_units_complete",
+        "all_data_quality_checks_passing",
+        "row_counts_reconciled",
+        "etl_pipelines_tested",
+        "performance_benchmarks_met"
+      ],
+      "default_agents": ["migration-executor"],
+      "skills": ["etl-development", "sql-authoring", "data-validation", "pipeline-testing"],
+      "prompt_supplement": "Execute migration units in DAG order. Each unit is implemented by a fresh-context agent that receives the migration unit spec and produces: DDL scripts, transformation SQL or pipeline code, and a validation test suite. After each unit, run row count reconciliation and data quality assertions against both source and target. Capture before/after checksums for critical tables. Flag any data anomalies discovered during migration for human review before proceeding."
+    },
+    "deploy": {
+      "entry_criteria": [
+        "implement_complete"
+      ],
+      "exit_criteria": [
+        "cutover_runbook_exists",
+        "production_migration_executed",
+        "post_migration_validation_passed",
+        "downstream_consumers_verified",
+        "legacy_system_decommission_plan_documented"
+      ],
+      "default_agents": ["migration-deployer"],
+      "skills": ["cutover-orchestration", "zero-downtime-migration", "smoke-testing", "stakeholder-communication"],
+      "prompt_supplement": "Execute the production cutover according to the approved runbook. Prefer zero-downtime strategies (dual-write with reader switchover, CDC-based cutover) wherever possible. Run the full post-migration validation suite immediately after cutover: row count reconciliation, data quality assertions, and downstream consumer smoke tests. Document all deviations from the runbook. Do not decommission legacy systems until all validation gates have passed and a minimum stabilization window has elapsed."
+    },
+    "sustain": {
+      "entry_criteria": [
+        "deploy_complete"
+      ],
+      "exit_criteria": [],
+      "default_agents": ["data-monitor"],
+      "skills": ["data-quality-monitoring", "pipeline-alerting", "schema-drift-detection", "performance-tracking"],
+      "prompt_supplement": "Establish ongoing data quality monitoring, pipeline health alerting, and schema drift detection for all migrated data assets. Configure row count trend alerts, data freshness SLA monitors, and anomaly detection on key metrics. Create operational runbooks for common failure modes (pipeline stalls, schema drift, upstream changes). Set up a schema change review process to prevent uncontrolled schema evolution in the target system."
+    }
+  }
+}

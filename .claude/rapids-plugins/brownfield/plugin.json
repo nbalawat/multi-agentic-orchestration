@@ -1,0 +1,93 @@
+{
+  "name": "brownfield",
+  "archetype": "brownfield",
+  "description": "Plugin for brownfield projects that enhance, refactor, or extend existing codebases. Provides a full RAPIDS workflow optimized for incremental, backward-compatible changes with strong regression safety nets and minimal disruption to production systems.",
+  "version": "1.0.0",
+  "phases": {
+    "research": {
+      "entry_criteria": [],
+      "exit_criteria": [
+        "codebase_inventory_complete",
+        "existing_behavior_documented",
+        "test_coverage_baseline_captured",
+        "technical_debt_catalogued",
+        "integration_points_mapped",
+        "change_objectives_defined"
+      ],
+      "default_agents": ["codebase-analyst"],
+      "skills": ["code-reading", "dependency-analysis", "test-coverage-analysis", "stakeholder-interview"],
+      "prompt_supplement": "This is a brownfield project with an existing production codebase. Research must thoroughly understand the current system before proposing any changes. Map all integration points, external dependencies, implicit contracts, and undocumented behaviors. Capture the current test coverage baseline. Catalogue technical debt and hotspots. Clearly separate what must be preserved (backward compatibility requirements, API contracts, data formats) from what is safe to change. Interview stakeholders to distinguish intentional design from accidental complexity."
+    },
+    "analysis": {
+      "entry_criteria": [
+        "research_complete"
+      ],
+      "exit_criteria": [
+        "refactoring_strategy_documented",
+        "backward_compatibility_constraints_listed",
+        "risk_assessment_complete",
+        "architecture_target_state_defined",
+        "decision_records_created"
+      ],
+      "default_agents": ["refactoring-architect"],
+      "skills": ["refactoring-pattern-selection", "risk-assessment", "architecture-analysis", "dependency-decoupling"],
+      "prompt_supplement": "Design an incremental improvement strategy that respects all backward compatibility constraints identified during research. Prefer strangler-fig, branch-by-abstraction, and parallel-change patterns over big-bang rewrites. Explicitly document every external API contract, database schema dependency, and behavioral guarantee that must be preserved throughout all changes. Assess risk for each proposed change area and assign a risk tier (low/medium/high). High-risk changes must include a specific mitigation plan and rollback procedure."
+    },
+    "plan": {
+      "entry_criteria": [
+        "analysis_complete"
+      ],
+      "exit_criteria": [
+        "spec_exists",
+        "feature_dag_valid",
+        "feature_specs_exist",
+        "regression_test_strategy_defined",
+        "acceptance_criteria_defined",
+        "rollback_procedures_documented"
+      ],
+      "default_agents": ["incremental-planner"],
+      "skills": ["incremental-decomposition", "dependency-mapping", "spec-writing", "test-planning"],
+      "prompt_supplement": "Decompose the brownfield enhancement into small, independently deployable increments. Each increment must leave the system in a fully working state — no partially completed refactors that break production. Build a dependency DAG with explicit backward-compatibility checkpoints. Each feature spec must include: the current behavior being changed, the target behavior, a characterization test suite to lock in existing behavior before refactoring begins, and a rollback procedure. Prioritize increments that add test coverage to currently untested areas before refactoring those areas."
+    },
+    "implement": {
+      "entry_criteria": [
+        "plan_complete",
+        "feature_dag_valid"
+      ],
+      "exit_criteria": [
+        "all_features_complete",
+        "all_tests_passing",
+        "regression_suite_passing",
+        "no_backward_compatibility_violations",
+        "test_coverage_improved_or_maintained"
+      ],
+      "default_agents": ["enhancement-builder"],
+      "skills": ["code-modification", "refactoring", "test-writing", "regression-testing"],
+      "prompt_supplement": "Implement each increment in strict adherence to the backward compatibility constraints. Before modifying any code area, first write or verify characterization tests that capture the current behavior. Apply refactoring patterns (extract method, introduce seam, wrap and delegate) to make the code change-safe before making functional changes. Run the full regression suite after every increment — never carry forward a failing test. Flag any discovered backward compatibility risk immediately rather than working around it silently."
+    },
+    "deploy": {
+      "entry_criteria": [
+        "implement_complete"
+      ],
+      "exit_criteria": [
+        "deployment_artifacts_exist",
+        "canary_or_staged_rollout_configured",
+        "feature_flags_configured",
+        "deployment_verified",
+        "rollback_tested"
+      ],
+      "default_agents": ["deployer"],
+      "skills": ["staged-rollout", "feature-flag-management", "canary-deployment", "smoke-testing"],
+      "prompt_supplement": "Deploy brownfield changes using a staged rollout strategy (canary, blue-green, or feature flags) to limit blast radius. Never deploy brownfield changes as a single all-or-nothing release. Verify rollback procedures are functional before committing to the new version. Run smoke tests against the production environment targeting all critical integration points identified during research. Monitor error rates and latency for at least one full traffic cycle before declaring the deployment complete."
+    },
+    "sustain": {
+      "entry_criteria": [
+        "deploy_complete"
+      ],
+      "exit_criteria": [],
+      "default_agents": ["monitor"],
+      "skills": ["regression-monitoring", "performance-tracking", "alerting-configuration", "debt-tracking"],
+      "prompt_supplement": "Establish monitoring that tracks both new functionality and existing behavior to detect regressions in production. Set up alerts on error rate changes, latency regressions, and unexpected behavior deviations from the pre-change baseline. Maintain a living technical debt register updated with any new debt introduced or retired during this project. Document any areas of the codebase that remain fragile and require special care in future changes."
+    }
+  }
+}

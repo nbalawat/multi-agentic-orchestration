@@ -1,9 +1,12 @@
 """
-Plugin Loader
+Plugin Loader & Registry
 
 Discovers and loads archetype plugins from .claude/rapids-plugins/.
 Each plugin provides commands, skills, agents, workflows, and hooks
 for a specific project archetype.
+
+The PluginRegistry extends PluginLoader with multi-plugin management,
+project binding, and capability enumeration for the orchestrator.
 """
 
 from typing import Dict, List, Optional, Any
@@ -12,6 +15,9 @@ from pydantic import BaseModel, Field
 import json
 import yaml
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PhaseConfig(BaseModel):
@@ -229,3 +235,222 @@ class PluginLoader:
                 overrides[phase_name] = phase_overrides
 
         return overrides
+
+    @property
+    def plugins_dir(self) -> Path:
+        """Expose plugins directory path."""
+        return self._plugins_dir
+
+
+class PluginCapabilities(BaseModel):
+    """Structured capabilities report for a plugin."""
+    name: str
+    archetype: str
+    description: str
+    version: str
+    phases: List[str] = Field(default_factory=list)
+    agents: List[Dict[str, Any]] = Field(default_factory=list)
+    commands: List[str] = Field(default_factory=list)
+    workflows: List[str] = Field(default_factory=list)
+    skills_per_phase: Dict[str, List[str]] = Field(default_factory=dict)
+    plugin_dir: Optional[str] = None
+
+
+class PluginRegistry:
+    """
+    Multi-plugin registry that wraps PluginLoader with:
+    - Auto-discovery of all plugins on init
+    - Project-to-plugin binding
+    - Capability enumeration for orchestrator prompts
+    - Dual-format support (plugin.json or rapids-manifest.json)
+    """
+
+    def __init__(self, plugins_dir: Path):
+        self._loader = PluginLoader(plugins_dir)
+        self._project_bindings: Dict[str, str] = {}  # project_id -> plugin_name
+        self._discover()
+
+    def _discover(self):
+        """Discover all plugins, supporting both plugin.json and rapids-manifest.json."""
+        # Standard discovery (plugin.json)
+        self._loader.discover_plugins()
+
+        # Also check for rapids-manifest.json (new format)
+        if self._loader.plugins_dir.exists():
+            for candidate in sorted(self._loader.plugins_dir.iterdir()):
+                if not candidate.is_dir():
+                    continue
+                rapids_manifest = candidate / "rapids-manifest.json"
+                if rapids_manifest.exists() and not (candidate / "plugin.json").exists():
+                    try:
+                        raw = json.loads(rapids_manifest.read_text(encoding="utf-8"))
+                        manifest = PluginManifest(**raw)
+                        self._loader._plugins[manifest.name] = manifest
+                        logger.info(f"Loaded plugin from rapids-manifest.json: {manifest.name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to load rapids-manifest.json in {candidate}: {e}")
+
+        count = len(self._loader._plugins)
+        logger.info(f"PluginRegistry discovered {count} plugins: {list(self._loader._plugins.keys())}")
+
+    @property
+    def loader(self) -> PluginLoader:
+        """Access the underlying PluginLoader."""
+        return self._loader
+
+    def list_all(self) -> List[PluginManifest]:
+        """List all discovered plugins."""
+        return self._loader.list_plugins()
+
+    def get_plugin(self, name: str) -> Optional[PluginManifest]:
+        """Get a plugin by name."""
+        return self._loader.get_plugin(name)
+
+    def get_for_archetype(self, archetype: str) -> Optional[PluginManifest]:
+        """Find a plugin matching an archetype."""
+        return self._loader.get_plugin_for_archetype(archetype)
+
+    def bind_project(self, project_id: str, plugin_name: str):
+        """Bind a project to a specific plugin."""
+        if self._loader.get_plugin(plugin_name) is None:
+            raise ValueError(f"Plugin not found: {plugin_name}")
+        self._project_bindings[project_id] = plugin_name
+        logger.info(f"Bound project {project_id} to plugin {plugin_name}")
+
+    def get_for_project(self, project_id: str) -> Optional[PluginManifest]:
+        """Get the plugin bound to a project."""
+        plugin_name = self._project_bindings.get(project_id)
+        if plugin_name is None:
+            return None
+        return self._loader.get_plugin(plugin_name)
+
+    def get_plugin_dir(self, plugin_name: str) -> Optional[Path]:
+        """Get the filesystem path for a plugin."""
+        return self._loader.get_plugin_dir(plugin_name)
+
+    def list_capabilities(self, plugin_name: str) -> Optional[PluginCapabilities]:
+        """
+        Enumerate ALL capabilities of a plugin: agents, commands, workflows, skills.
+        Used by the orchestrator to understand what a plugin offers.
+        """
+        plugin = self._loader.get_plugin(plugin_name)
+        if plugin is None:
+            return None
+
+        # Load agent templates
+        self._loader.load_agent_templates(plugin_name)
+        agent_templates = self._loader._agent_templates.get(plugin_name, {})
+
+        # Enumerate commands
+        commands_dir = self._loader.get_commands_dir(plugin_name)
+        command_names = []
+        if commands_dir and commands_dir.exists():
+            command_names = [f.stem for f in sorted(commands_dir.glob("*.md"))]
+
+        # Enumerate workflows
+        workflows_dir = self._loader.get_workflows_dir(plugin_name)
+        workflow_names = []
+        if workflows_dir and workflows_dir.exists():
+            workflow_names = [f.stem for f in sorted(workflows_dir.glob("*.md"))]
+
+        # Collect skills per phase
+        skills_per_phase: Dict[str, List[str]] = {}
+        for phase_name, phase_config in plugin.phases.items():
+            if phase_config.skills:
+                skills_per_phase[phase_name] = phase_config.skills
+
+        # Build agent info list
+        agents_info = []
+        for name, tmpl in agent_templates.items():
+            agents_info.append({
+                "name": name,
+                "description": tmpl.description or "",
+                "model": tmpl.model,
+                "tools": tmpl.tools,
+                "color": tmpl.color,
+            })
+
+        plugin_dir = self._loader.get_plugin_dir(plugin_name)
+
+        return PluginCapabilities(
+            name=plugin.name,
+            archetype=plugin.archetype,
+            description=plugin.description,
+            version=plugin.version,
+            phases=list(plugin.phases.keys()),
+            agents=agents_info,
+            commands=command_names,
+            workflows=workflow_names,
+            skills_per_phase=skills_per_phase,
+            plugin_dir=str(plugin_dir) if plugin_dir else None,
+        )
+
+    def build_plugin_catalog(self) -> str:
+        """
+        Build a markdown catalog of ALL plugins for the orchestrator's system prompt.
+        This lets the orchestrator know what's available and make informed decisions.
+        """
+        plugins = self._loader.list_plugins()
+        if not plugins:
+            return "No plugins discovered."
+
+        lines = ["## Available Archetype Plugins\n"]
+
+        for plugin in plugins:
+            caps = self.list_capabilities(plugin.name)
+            if caps is None:
+                continue
+
+            lines.append(f"### {plugin.name} (v{plugin.version})")
+            lines.append(f"**Archetype:** {plugin.archetype}")
+            lines.append(f"**Description:** {plugin.description}")
+            lines.append(f"**Phases:** {', '.join(caps.phases)}")
+
+            if caps.agents:
+                agent_list = ", ".join(a["name"] for a in caps.agents)
+                lines.append(f"**Agents:** {agent_list}")
+
+            if caps.commands:
+                cmd_list = ", ".join(f"/{c}" for c in caps.commands)
+                lines.append(f"**Commands:** {cmd_list}")
+
+            if caps.workflows:
+                wf_list = ", ".join(caps.workflows)
+                lines.append(f"**Workflows:** {wf_list}")
+
+            # Show phase→agent mapping
+            for phase_name, phase_config in plugin.phases.items():
+                if phase_config.default_agents:
+                    agents_str = ", ".join(phase_config.default_agents)
+                    lines.append(f"  - {phase_name}: agents=[{agents_str}]")
+
+            lines.append("")  # blank line between plugins
+
+        return "\n".join(lines)
+
+    def get_agent_template(self, plugin_name: str, agent_name: str) -> Optional[AgentTemplate]:
+        """Get a specific agent template from a plugin."""
+        if plugin_name not in self._loader._agent_templates:
+            self._loader.load_agent_templates(plugin_name)
+        templates = self._loader._agent_templates.get(plugin_name, {})
+        return templates.get(agent_name)
+
+    def get_phase_agents(self, plugin_name: str, phase: str) -> List[AgentTemplate]:
+        """Get agent templates for a specific phase."""
+        return self._loader.get_agents_for_phase(plugin_name, phase)
+
+    def get_phase_workflow_path(self, plugin_name: str, phase: str) -> Optional[Path]:
+        """Get the workflow file path for a specific phase."""
+        workflows_dir = self._loader.get_workflows_dir(plugin_name)
+        if workflows_dir is None:
+            return None
+        # Try exact match first, then partial match
+        for pattern in [f"{phase}-workflow.md", f"{phase}.md", f"{phase}-*.md"]:
+            matches = list(workflows_dir.glob(pattern))
+            if matches:
+                return matches[0]
+        return None
+
+    def get_phase_config(self, plugin_name: str, phase: str) -> Optional[PhaseConfig]:
+        """Get phase configuration from a plugin."""
+        return self._loader.get_phase_config(plugin_name, phase)
