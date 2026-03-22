@@ -1,0 +1,5 @@
+{
+  "name": "brownfield",
+  "description": "Plugin for brownfield projects that enhance, refactor, or extend existing codebases. Provides a full RAPIDS workflow optimized for incremental, backward-compatible changes with strong regression safety nets and minimal disruption to production systems.",
+  "version": "1.0.0"
+}

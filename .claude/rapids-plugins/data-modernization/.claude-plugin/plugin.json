@@ -1,0 +1,5 @@
+{
+  "name": "data-modernization",
+  "description": "Plugin for data modernization projects including database migration, schema evolution, and ETL pipeline development. Provides a full RAPIDS workflow optimized for moving data assets from legacy systems to modern platforms with zero data loss and minimal downtime.",
+  "version": "1.0.0"
+}

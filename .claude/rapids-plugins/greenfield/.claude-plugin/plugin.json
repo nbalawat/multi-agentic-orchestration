@@ -1,0 +1,5 @@
+{
+  "name": "greenfield",
+  "description": "Plugin for greenfield projects built from scratch. Provides a full RAPIDS workflow from initial research through sustained operation, optimized for new codebases with no legacy constraints.",
+  "version": "1.0.0"
+}

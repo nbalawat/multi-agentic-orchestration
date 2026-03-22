@@ -196,6 +196,16 @@ class AgentManager:
                     self.logger.info(f"Building phase-aware prompt for {phase}/{project_id}")
                     system_prompt = self.build_phase_agent_prompt(phase, project_id)
                     self.logger.info(f"Phase prompt built: {len(system_prompt)} chars for {phase}")
+                    # Pass phase metadata through to create_agent for SDK plugin loading
+                    if not subagent_template:
+                        subagent_template = None  # Ensure clean path
+                    # We'll pass archetype via a special convention in the model field
+                    # Actually, modify create_agent to accept phase_metadata
+                    _phase_metadata = {"phase": phase, "project_id": project_id}
+                    # Get archetype from workspace context
+                    if hasattr(self, 'workspace_manager') and self.workspace_manager:
+                        ctx = self.workspace_manager._project_contexts.get(project_id, {})
+                        _phase_metadata["archetype"] = ctx.get("archetype", ctx.get("plugin_id", ""))
                 elif not system_prompt and not subagent_template:
                     return {
                         "content": [
@@ -207,7 +217,9 @@ class AgentManager:
                         "is_error": True,
                     }
 
-                result = await self.create_agent(name, system_prompt, model, subagent_template)
+                # Pass phase metadata if available (for SDK plugin auto-discovery)
+                phase_meta = locals().get('_phase_metadata', {})
+                result = await self.create_agent(name, system_prompt, model, subagent_template, phase_metadata=phase_meta)
 
                 if result["ok"]:
                     return {
@@ -1666,7 +1678,8 @@ class AgentManager:
         return "\n".join(parts)
 
     async def create_agent(
-        self, name: str, system_prompt: str, model: Optional[str] = None, subagent_template: Optional[str] = None
+        self, name: str, system_prompt: str, model: Optional[str] = None,
+        subagent_template: Optional[str] = None, phase_metadata: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
         Create a new agent.
@@ -1676,13 +1689,14 @@ class AgentManager:
             system_prompt: Agent's system prompt (can be empty if using template)
             model: Optional model override
             subagent_template: Optional template name to use
+            phase_metadata: Optional dict with phase, project_id, archetype for SDK plugin loading
 
         Returns:
             Dict with ok, agent_id, session_id, or error
         """
         try:
             # Handle template-based creation
-            metadata = {}
+            metadata = phase_metadata or {}
             allowed_tools = None  # Will use defaults if not specified
 
             if subagent_template:
@@ -1796,8 +1810,21 @@ class AgentManager:
                 "disallowed_tools": default_disallowed,
                 "permission_mode": "acceptEdits",
                 "env": env_vars,
-                "setting_sources": ["project"],
+                "setting_sources": ["user", "project"],  # Required for SDK skill auto-discovery
             }
+
+            # Load plugin for SDK auto-discovery of skills, agents, commands
+            # This makes plugin skills invocable by the agent (e.g. /greenfield:web-research)
+            plugin_registry = getattr(self, 'plugin_registry', None)
+            if plugin_registry and metadata.get("archetype"):
+                plugin_dir = plugin_registry.get_plugin_dir(metadata["archetype"])
+                if plugin_dir:
+                    agent_options["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
+                    # Also include Skill in allowed tools so agent can invoke skills
+                    if "Skill" not in tools_to_use:
+                        tools_to_use.append("Skill")
+                        agent_options["allowed_tools"] = tools_to_use
+                    self.logger.info(f"Loaded SDK plugin for agent '{name}': {plugin_dir}")
 
             if not name.startswith("builder-"):
                 agent_options["can_use_tool"] = self._create_agent_can_use_tool(agent_id, name)

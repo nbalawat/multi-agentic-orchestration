@@ -251,9 +251,11 @@ class PluginCapabilities(BaseModel):
     phases: List[str] = Field(default_factory=list)
     agents: List[Dict[str, Any]] = Field(default_factory=list)
     commands: List[str] = Field(default_factory=list)
+    skills: List[str] = Field(default_factory=list)  # Actual SKILL.md implementations
     workflows: List[str] = Field(default_factory=list)
     skills_per_phase: Dict[str, List[str]] = Field(default_factory=dict)
     plugin_dir: Optional[str] = None
+    has_sdk_manifest: bool = False  # Has .claude-plugin/plugin.json
 
 
 class PluginRegistry:
@@ -353,7 +355,15 @@ class PluginRegistry:
         if workflows_dir and workflows_dir.exists():
             workflow_names = [f.stem for f in sorted(workflows_dir.glob("*.md"))]
 
-        # Collect skills per phase
+        # Enumerate skills from skills/ directory (SDK SKILL.md format)
+        skills_dir = self._loader.get_skills_dir(plugin_name)
+        skill_names = []
+        if skills_dir and skills_dir.exists():
+            for skill_subdir in sorted(skills_dir.iterdir()):
+                if skill_subdir.is_dir() and (skill_subdir / "SKILL.md").exists():
+                    skill_names.append(skill_subdir.name)
+
+        # Collect skills per phase from manifest
         skills_per_phase: Dict[str, List[str]] = {}
         for phase_name, phase_config in plugin.phases.items():
             if phase_config.skills:
@@ -372,6 +382,11 @@ class PluginRegistry:
 
         plugin_dir = self._loader.get_plugin_dir(plugin_name)
 
+        # Check for SDK manifest
+        has_sdk = False
+        if plugin_dir:
+            has_sdk = (plugin_dir / ".claude-plugin" / "plugin.json").exists()
+
         return PluginCapabilities(
             name=plugin.name,
             archetype=plugin.archetype,
@@ -380,9 +395,11 @@ class PluginRegistry:
             phases=list(plugin.phases.keys()),
             agents=agents_info,
             commands=command_names,
+            skills=skill_names,
             workflows=workflow_names,
             skills_per_phase=skills_per_phase,
             plugin_dir=str(plugin_dir) if plugin_dir else None,
+            has_sdk_manifest=has_sdk,
         )
 
     def build_plugin_catalog(self) -> str:
@@ -410,6 +427,10 @@ class PluginRegistry:
                 agent_list = ", ".join(a["name"] for a in caps.agents)
                 lines.append(f"**Agents:** {agent_list}")
 
+            if caps.skills:
+                skill_list = ", ".join(f"/{plugin.name}:{s}" for s in caps.skills)
+                lines.append(f"**Skills (auto-invocable):** {skill_list}")
+
             if caps.commands:
                 cmd_list = ", ".join(f"/{c}" for c in caps.commands)
                 lines.append(f"**Commands:** {cmd_list}")
@@ -417,6 +438,9 @@ class PluginRegistry:
             if caps.workflows:
                 wf_list = ", ".join(caps.workflows)
                 lines.append(f"**Workflows:** {wf_list}")
+
+            if caps.has_sdk_manifest:
+                lines.append(f"**SDK Compatible:** Yes (agents get auto-discovery of skills via SDK plugin loading)")
 
             # Show phase→agent mapping
             for phase_name, phase_config in plugin.phases.items():

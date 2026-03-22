@@ -1,0 +1,5 @@
+{
+  "name": "reverse-engineering",
+  "description": "Plugin for reverse-engineering undocumented or poorly documented codebases. Provides a full RAPIDS workflow for code archaeology, architecture recovery, and comprehensive documentation generation — transforming opaque legacy systems into understood, maintainable assets.",
+  "version": "1.0.0"
+}
