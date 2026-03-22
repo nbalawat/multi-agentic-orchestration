@@ -666,7 +666,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200 or data.get("status") != "success":
+                if resp.status_code not in (200, 201) or data.get("status") != "success":
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
                         "is_error": True,
@@ -758,7 +758,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200 or data.get("status") != "success":
+                if resp.status_code not in (200, 201) or data.get("status") != "success":
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
                         "is_error": True,
@@ -849,7 +849,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Project not found')}"}],
                         "is_error": True,
@@ -942,7 +942,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to start phase')}"}],
                         "is_error": True,
@@ -989,7 +989,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to complete phase')}"}],
                         "is_error": True,
@@ -1034,7 +1034,7 @@ class AgentManager:
                     )
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to advance phase')}"}],
                         "is_error": True,
@@ -1121,6 +1121,16 @@ class AgentManager:
                 depends_on = [d.strip() for d in depends_on_str.split(",") if d.strip()] if depends_on_str else []
                 acceptance_criteria = [a.strip() for a in acceptance_criteria_str.split(",") if a.strip()] if acceptance_criteria_str else []
 
+                # Convert priority to int (API expects integer)
+                priority_map = {"critical": 0, "high": 1, "medium": 2, "low": 3, "p0": 0, "p1": 1, "p2": 2, "p3": 3}
+                if isinstance(priority, str):
+                    priority_int = priority_map.get(priority.lower(), 2)
+                else:
+                    try:
+                        priority_int = int(priority)
+                    except (ValueError, TypeError):
+                        priority_int = 2
+
                 async with httpx.AsyncClient() as client:
                     resp = await client.post(
                         f"{_API_BASE}/api/projects/{project_id}/features",
@@ -1129,13 +1139,13 @@ class AgentManager:
                             "description": description,
                             "depends_on": depends_on,
                             "acceptance_criteria": acceptance_criteria,
-                            "priority": priority,
+                            "priority": priority_int,
                         },
                         timeout=15.0,
                     )
                     data = resp.json()
 
-                if resp.status_code != 200 or data.get("status") != "success":
+                if resp.status_code not in (200, 201) or data.get("status") != "success":
                     return {
                         "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
                         "is_error": True,
@@ -1183,7 +1193,7 @@ class AgentManager:
                     resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {"content": [{"type": "text", "text": f"Error: {data.get('detail', 'No features found')}"}]}
 
                 status = data.get("dag_status", {})
@@ -1235,7 +1245,7 @@ class AgentManager:
                     resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
                     data = resp.json()
 
-                if resp.status_code != 200:
+                if resp.status_code not in (200, 201):
                     return {"content": [{"type": "text", "text": f"Error: {data.get('detail', 'No features found')}"}]}
 
                 # Use ready_features from DAG API (correctly computed by FeatureDAG.get_ready_features)
