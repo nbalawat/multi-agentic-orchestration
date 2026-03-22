@@ -1,0 +1,84 @@
+{
+  "name": "greenfield",
+  "archetype": "greenfield",
+  "description": "Plugin for greenfield projects built from scratch. Provides a full RAPIDS workflow from initial research through sustained operation, optimized for new codebases with no legacy constraints.",
+  "version": "1.0.0",
+  "phases": {
+    "research": {
+      "entry_criteria": [],
+      "exit_criteria": [
+        "research_artifacts_exist",
+        "problem_statement_defined",
+        "technology_landscape_documented",
+        "constraints_identified"
+      ],
+      "default_agents": ["researcher"],
+      "skills": ["web-research", "domain-analysis", "stakeholder-interview"],
+      "prompt_supplement": "This is a greenfield project with no existing codebase. Research should focus on understanding the problem domain from first principles, surveying the technology landscape for optimal choices, and identifying all constraints and requirements before any design work begins."
+    },
+    "analysis": {
+      "entry_criteria": [
+        "research_complete"
+      ],
+      "exit_criteria": [
+        "analysis_artifacts_exist",
+        "architecture_design_documented",
+        "technology_stack_selected",
+        "decision_records_created"
+      ],
+      "default_agents": ["architect"],
+      "skills": ["solution-design", "technology-evaluation", "risk-assessment"],
+      "prompt_supplement": "Since this is a greenfield project, the architecture can be designed without legacy constraints. Focus on selecting the optimal technology stack, designing a clean architecture, and documenting all major decisions with ADRs. Consider scalability, maintainability, and team capabilities."
+    },
+    "plan": {
+      "entry_criteria": [
+        "analysis_complete"
+      ],
+      "exit_criteria": [
+        "spec_exists",
+        "feature_dag_valid",
+        "feature_specs_exist",
+        "acceptance_criteria_defined"
+      ],
+      "default_agents": ["planner"],
+      "skills": ["feature-decomposition", "dependency-mapping", "spec-writing"],
+      "prompt_supplement": "Decompose the greenfield project into well-defined features with clear boundaries. Build a dependency DAG that enables maximum parallelism during implementation. Each feature spec must include acceptance criteria, interface contracts, and implementation guidance sufficient for an isolated agent to build it."
+    },
+    "implement": {
+      "entry_criteria": [
+        "plan_complete",
+        "feature_dag_valid"
+      ],
+      "exit_criteria": [
+        "all_features_complete",
+        "all_tests_passing",
+        "integration_verified"
+      ],
+      "default_agents": ["feature-builder", "tester"],
+      "skills": ["code-generation", "test-writing", "integration-testing"],
+      "prompt_supplement": "Execute the feature DAG autonomously. Each feature is implemented by a fresh-context agent that receives only the feature spec and relevant interface contracts. After each feature, run tests and verify integration with completed dependencies. Build from the DAG leaves upward."
+    },
+    "deploy": {
+      "entry_criteria": [
+        "implement_complete"
+      ],
+      "exit_criteria": [
+        "deployment_artifacts_exist",
+        "ci_cd_configured",
+        "deployment_verified"
+      ],
+      "default_agents": ["deployer"],
+      "skills": ["infrastructure-setup", "ci-cd-configuration", "deployment-automation"],
+      "prompt_supplement": "Set up deployment infrastructure for the new project. Configure CI/CD pipelines, containerization, environment management, and deployment automation. Since this is greenfield, establish best practices from the start including infrastructure-as-code, automated testing gates, and rollback procedures."
+    },
+    "sustain": {
+      "entry_criteria": [
+        "deploy_complete"
+      ],
+      "exit_criteria": [],
+      "default_agents": ["monitor"],
+      "skills": ["monitoring-setup", "alerting-configuration", "performance-tracking"],
+      "prompt_supplement": "Establish monitoring, alerting, and operational runbooks for the newly deployed project. Set up health checks, performance baselines, error tracking, and on-call procedures. Create documentation for ongoing maintenance and feature addition workflows."
+    }
+  }
+}

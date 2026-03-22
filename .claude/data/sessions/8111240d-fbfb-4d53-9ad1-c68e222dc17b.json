@@ -1,0 +1,8 @@
+{
+  "session_id": "8111240d-fbfb-4d53-9ad1-c68e222dc17b",
+  "prompts": [
+    "I don't want to use the Docker setup from the engine platform. Just take the Anthropic API key from there and create a separate Docker setup for this particular project. I don't want to be using those things from the other project, please.",
+    "Why is there nothing appearing in the middle section? The left-hand panel and the middle section need to have details of what is happening. I don't really see anything coming through there. We need to fix that."
+  ],
+  "agent_name": "Synth"
+}

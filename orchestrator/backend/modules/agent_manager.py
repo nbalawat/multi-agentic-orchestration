@@ -1,0 +1,2425 @@
+"""
+Agent Manager Module
+
+Centralize agent lifecycle management, tool registration, and background execution.
+Implements 20 management tools for the orchestrator agent (8 core + 12 RAPIDS).
+"""
+
+import threading
+import asyncio
+import uuid
+import os
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+
+from claude_agent_sdk import (
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    AssistantMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    ResultMessage,
+    tool,
+    create_sdk_mcp_server,
+    HookMatcher,
+)
+
+from .database import (
+    create_agent,
+    get_agent,
+    get_agent_by_name,
+    list_agents,
+    update_agent_session,
+    update_agent_status,
+    update_agent_costs,
+    delete_agent,
+    get_tail_summaries,
+    get_tail_raw,
+    get_latest_task_slug,
+    insert_prompt,
+    insert_message_block,
+    update_prompt_summary,
+    update_log_summary,
+)
+from .single_agent_prompt import summarize_event
+from .command_agent_hooks import (
+    create_pre_tool_hook,
+    create_post_tool_hook,
+    create_user_prompt_hook,
+    create_stop_hook,
+    create_subagent_stop_hook,
+    create_pre_compact_hook,
+    create_post_tool_file_tracking_hook,
+)
+from .websocket_manager import WebSocketManager
+from .logger import OrchestratorLogger
+from . import config
+from .file_tracker import FileTracker
+from .subagent_loader import SubagentRegistry
+import httpx
+
+# RAPIDS DB functions are NOT used directly by MCP tools (they run in a subprocess).
+# MCP tools call the FastAPI HTTP API instead. These imports are kept for non-MCP usage.
+from .rapids_database import (
+    create_workspace as db_create_workspace,
+    get_workspace as db_get_workspace,
+    list_workspaces as db_list_workspaces,
+    create_project as db_create_project,
+    get_project as db_get_project,
+    list_projects as db_list_projects,
+    update_project_phase as db_update_project_phase,
+    list_project_phases as db_list_project_phases,
+    create_feature as db_create_feature,
+    list_features as db_list_features,
+    update_feature_status as db_update_feature_status,
+    init_project_phases as db_init_project_phases,
+)
+
+# Base URL for MCP tools to call FastAPI endpoints (tools run in SDK subprocess)
+_API_BASE = f"http://{config.BACKEND_HOST}:{config.BACKEND_PORT}"
+from .workspace_manager import WorkspaceManager
+from .plugin_loader import PluginLoader
+from .feature_dag import FeatureDAG
+from .project_state import ProjectState
+from .phase_engine import PhaseEngine
+from .git_worktree import GitWorktreeManager
+
+
+class AgentManager:
+    """
+    Manages agent lifecycle, tool registration, and background execution.
+    """
+
+    def __init__(
+        self,
+        orchestrator_agent_id: uuid.UUID,
+        ws_manager: WebSocketManager,
+        logger: OrchestratorLogger,
+        working_dir: Optional[str] = None,
+    ):
+        """
+        Initialize Agent Manager.
+
+        Args:
+            orchestrator_agent_id: UUID of the orchestrator agent (for scoping agents)
+            ws_manager: WebSocket manager for broadcasting
+            logger: Logger instance
+            working_dir: Optional working directory override
+        """
+        self.orchestrator_agent_id = orchestrator_agent_id
+        self.ws_manager = ws_manager
+        self.logger = logger
+        self.working_dir = working_dir or config.get_working_dir()
+        self.active_clients: Dict[str, ClaudeSDKClient] = {}
+        self.active_clients_lock = threading.Lock()
+
+        # File tracking registry (keyed by agent_id)
+        self.file_trackers: Dict[str, FileTracker] = {}
+
+        # Per-agent pending question futures (keyed by agent_id string)
+        self._pending_agent_questions: Dict[str, asyncio.Future] = {}
+
+        # RAPIDS workspace/plugin managers (optional, set after init)
+        self.workspace_manager: Optional['WorkspaceManager'] = None
+        self.plugin_loader: Optional['PluginLoader'] = None
+
+        # Subagent template registry
+        self.subagent_registry = SubagentRegistry(self.working_dir, self.logger)
+        template_count = len(self.subagent_registry._templates)
+        if template_count > 0:
+            self.logger.info(f"Subagent registry initialized with {template_count} template(s)")
+        else:
+            self.logger.warning("⚠️  No subagent templates available. Agents must be created manually.")
+
+        self.logger.info(
+            f"AgentManager initialized for orchestrator {orchestrator_agent_id}"
+        )
+
+    def create_management_tools(self) -> List:
+        """
+        Create 20 management tools for orchestrator (8 core + 12 RAPIDS).
+
+        Returns:
+            List of tool callables decorated with @tool
+        """
+
+        @tool(
+            "create_agent",
+            "Create a new agent. REQUIRED: name. OPTIONAL: system_prompt, model, subagent_template, phase, project_id. "
+            "When phase and project_id are provided, the agent gets an auto-constructed prompt with full project context, "
+            "phase-specific instructions, plugin workflow guidance, and artifact paths. "
+            "Use 'fast' for haiku model.",
+            {"name": str, "system_prompt": str, "model": str, "subagent_template": str, "phase": str, "project_id": str},
+        )
+        async def create_agent_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for creating new agents"""
+            try:
+                name = args.get("name")
+                system_prompt = args.get("system_prompt", "")
+                model_input = args.get("model", config.DEFAULT_AGENT_MODEL)
+                subagent_template = args.get("subagent_template")
+                phase = args.get("phase")
+                project_id = args.get("project_id")
+
+                # Model alias mapping
+                model_aliases = {
+                    "sonnet": "claude-sonnet-4-5-20250929",
+                    "haiku": "claude-haiku-4-5-20251001",
+                    "fast": "claude-haiku-4-5-20251001",  # Alias for haiku
+                }
+
+                # Resolve model alias or use as-is
+                model = (
+                    model_aliases.get(model_input.lower(), model_input)
+                    if isinstance(model_input, str)
+                    else model_input
+                )
+
+                # Validate required fields
+                if not name:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Error: 'name' is required",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                # If phase and project_id provided, auto-construct comprehensive prompt
+                if phase and project_id:
+                    self.logger.info(f"Building phase-aware prompt for {phase}/{project_id}")
+                    system_prompt = self.build_phase_agent_prompt(phase, project_id)
+                    self.logger.info(f"Phase prompt built: {len(system_prompt)} chars for {phase}")
+                elif not system_prompt and not subagent_template:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Error: Provide system_prompt, subagent_template, or phase+project_id",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                result = await self.create_agent(name, system_prompt, model, subagent_template)
+
+                if result["ok"]:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"✅ Created agent '{name}'\n"
+                                f"ID: {result['agent_id']}\n"
+                                f"Session: {result['session_id']}\n"
+                                f"Model: {model}",
+                            }
+                        ]
+                    }
+                else:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"❌ Failed: {result.get('error', 'Unknown error')}",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+            except Exception as e:
+                self.logger.error(f"create_agent tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "list_agents",
+            "List all active agents",
+            {},
+        )
+        async def list_agents_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for listing agents"""
+            try:
+                agents = await list_agents(self.orchestrator_agent_id, archived=False)
+
+                if not agents:
+                    return {"content": [{"type": "text", "text": "No agents found"}]}
+
+                lines = ["📋 Active Agents:\n"]
+                for agent in agents:
+                    lines.append(
+                        f"• {agent.name} (ID: {agent.id})\n"
+                        f"  Status: {agent.status}\n"
+                        f"  Model: {agent.model}\n"
+                        f"  Tokens: {agent.input_tokens + agent.output_tokens}\n"
+                        f"  Cost: ${agent.total_cost:.4f}\n"
+                    )
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"list_agents tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "command_agent",
+            "Send a command to an agent. REQUIRED: agent_name, command.",
+            {"agent_name": str, "command": str},
+        )
+        async def command_agent_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for commanding agents"""
+            try:
+                agent_name = args.get("agent_name")
+                command = args.get("command")
+
+                if not agent_name or not command:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "❌ Error: 'agent_name' and 'command' are required",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                # Get agent by name (scoped to this orchestrator)
+                agent = await get_agent_by_name(self.orchestrator_agent_id, agent_name)
+                if not agent:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"❌ Agent '{agent_name}' not found",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                # Command agent in background (agent.id is already UUID from Pydantic model)
+                asyncio.create_task(self.command_agent(agent.id, command))
+
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"✅ Command dispatched to '{agent_name}'\n"
+                            f"Command: {command[:100]}{'...' if len(command) > 100 else ''}\n"
+                            f"Agent will execute in background.",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"command_agent tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "check_agent_status",
+            "Check agent status and recent activity. REQUIRED: agent_name.",
+            {"agent_name": str, "tail_count": int, "offset": int, "verbose_logs": bool},
+        )
+        async def check_agent_status_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for checking agent status"""
+            try:
+                agent_name = args.get("agent_name")
+                tail_count = args.get("tail_count", 10)
+                offset = args.get("offset", 0)
+                verbose_logs = args.get("verbose_logs", False)
+
+                if not agent_name:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "❌ Error: 'agent_name' is required",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                agent = await get_agent_by_name(self.orchestrator_agent_id, agent_name)
+                if not agent:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"❌ Agent '{agent_name}' not found",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                # Use Pydantic model properties
+                task_slug = await get_latest_task_slug(agent.id)
+
+                lines = [
+                    f"📊 Agent Status: {agent.name}\n",
+                    f"Status: {agent.status}\n",
+                    f"Model: {agent.model}\n",
+                    f"Tokens: {agent.input_tokens + agent.output_tokens}\n",
+                    f"Cost: ${agent.total_cost:.4f}\n",
+                ]
+
+                if task_slug:
+                    lines.append(f"\n🔍 Recent Activity (Task: {task_slug}):\n")
+
+                    # Use verbose or summary mode
+                    if verbose_logs:
+                        logs = await get_tail_raw(
+                            agent.id, task_slug, count=tail_count, offset=offset
+                        )
+                        for log in logs:
+                            lines.append(
+                                f"• [{log['event_type']}] {log.get('content', 'No content')}\n"
+                                f"  Payload: {log.get('payload', {})}\n"
+                            )
+                    else:
+                        logs = await get_tail_summaries(
+                            agent.id, task_slug, count=tail_count, offset=offset
+                        )
+                        for log in logs:
+                            lines.append(
+                                f"• [{log['event_type']}] {log.get('summary', 'No summary')}\n"
+                            )
+                else:
+                    lines.append("\nNo recent activity\n")
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"check_agent_status tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "delete_agent",
+            "Delete an agent. REQUIRED: agent_name.",
+            {"agent_name": str},
+        )
+        async def delete_agent_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for deleting agents"""
+            try:
+                agent_name = args.get("agent_name")
+
+                if not agent_name:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "❌ Error: 'agent_name' is required",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                agent = await get_agent_by_name(self.orchestrator_agent_id, agent_name)
+                if not agent:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"❌ Agent '{agent_name}' not found",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                # Use Pydantic model properties
+                await delete_agent(agent.id)
+
+                # Clean up file tracker
+                if str(agent.id) in self.file_trackers:
+                    del self.file_trackers[str(agent.id)]
+
+                # Broadcast deletion (convert UUID to string for JSON)
+                await self.ws_manager.broadcast_agent_deleted(str(agent.id))
+
+                return {
+                    "content": [
+                        {"type": "text", "text": f"✅ Deleted agent '{agent_name}'"}
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"delete_agent tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "interrupt_agent",
+            "Interrupt a running agent. REQUIRED: agent_name.",
+            {"agent_name": str},
+        )
+        async def interrupt_agent_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for interrupting agents"""
+            try:
+                agent_name = args.get("agent_name")
+
+                if not agent_name:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "❌ Error: 'agent_name' is required",
+                            }
+                        ],
+                        "is_error": True,
+                    }
+
+                with self.active_clients_lock:
+                    client = self.active_clients.get(agent_name)
+
+                if client:
+                    await client.interrupt()
+                    with self.active_clients_lock:
+                        del self.active_clients[agent_name]
+
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"✅ Interrupted agent '{agent_name}'",
+                            }
+                        ]
+                    }
+                else:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"⚠️ Agent '{agent_name}' is not currently running",
+                            }
+                        ]
+                    }
+
+            except Exception as e:
+                self.logger.error(f"interrupt_agent tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "read_system_logs",
+            "Read recent system logs with filtering",
+            {"offset": int, "limit": int, "message_contains": str, "level": str},
+        )
+        async def read_system_logs_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for reading system logs"""
+            try:
+                from .database import list_system_logs
+
+                offset = args.get("offset", 0)
+                limit = args.get("limit", 50)
+                message_contains = args.get("message_contains")
+                level = args.get("level")
+
+                # Fetch system logs
+                logs = await list_system_logs(
+                    limit=limit,
+                    offset=offset,
+                    message_contains=message_contains,
+                    level=level,
+                )
+
+                if not logs:
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "📋 No system logs found matching the criteria",
+                            }
+                        ]
+                    }
+
+                lines = [f"📋 System Logs (showing {len(logs)} of max {limit}):\n\n"]
+
+                for log in logs:
+                    timestamp = log.get("timestamp", "N/A")
+                    if hasattr(timestamp, "isoformat"):
+                        timestamp = timestamp.isoformat()
+
+                    level_str = log.get("level", "INFO")
+                    message = log.get("message", "")
+                    summary = log.get("summary", "")
+
+                    # Show summary if available, otherwise message
+                    display_text = summary if summary else message
+
+                    lines.append(f"[{timestamp}] {level_str}: {display_text}\n")
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"read_system_logs tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "report_cost",
+            "Report orchestrator's costs, tokens, and session ID",
+            {},
+        )
+        async def report_cost_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for cost reporting"""
+            try:
+                from .database import get_orchestrator
+
+                # Get orchestrator agent info
+                orch_data = await get_orchestrator()
+
+                if not orch_data:
+                    return {
+                        "content": [
+                            {"type": "text", "text": "❌ Error: Orchestrator not found"}
+                        ],
+                        "is_error": True,
+                    }
+
+                total_tokens = orch_data["input_tokens"] + orch_data["output_tokens"]
+                context_percentage = (
+                    total_tokens / 200000
+                ) * 100  # 200k context window
+
+                lines = [
+                    "💰 Orchestrator Cost Report:\n\n",
+                    f"Session ID: {orch_data['session_id'] or 'Not set yet'}\n",
+                    f"Status: {orch_data['status']}\n\n",
+                    f"Total Cost: ${orch_data['total_cost']:.4f}\n",
+                    f"Input Tokens: {orch_data['input_tokens']:,}\n",
+                    f"Output Tokens: {orch_data['output_tokens']:,}\n",
+                    f"Total Tokens: {total_tokens:,}\n",
+                    f"Context Usage: {context_percentage:.1f}%\n",
+                ]
+
+                # Add warning if approaching context limit
+                if context_percentage >= 80:
+                    lines.append(
+                        f"\n⚠️  Warning: Context usage at {context_percentage:.1f}% - consider compacting soon\n"
+                    )
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"report_cost tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"❌ Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        # ── RAPIDS Workspace / Project / Phase / Feature Tools ──────────
+
+        @tool(
+            "create_workspace",
+            "Create a new RAPIDS workspace. REQUIRED: name, description.",
+            {"name": str, "description": str},
+        )
+        async def create_workspace_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for creating a RAPIDS workspace via HTTP API"""
+            try:
+                name = args.get("name")
+                description = args.get("description", "")
+
+                if not name:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'name' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/workspaces",
+                        json={"name": name, "description": description},
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200 or data.get("status") != "success":
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
+                        "is_error": True,
+                    }
+
+                ws = data["workspace"]
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Created workspace '{name}'\n"
+                            f"ID: {ws['id']}\n"
+                            f"Description: {description}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"create_workspace tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "list_workspaces",
+            "List all RAPIDS workspaces.",
+            {},
+        )
+        async def list_workspaces_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for listing RAPIDS workspaces via HTTP API"""
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/workspaces", timeout=15.0)
+                    data = resp.json()
+
+                workspaces = data.get("workspaces", [])
+                if not workspaces:
+                    return {"content": [{"type": "text", "text": "No workspaces found. Use create_workspace to create one."}]}
+
+                lines = ["RAPIDS Workspaces:\n"]
+                for ws in workspaces:
+                    lines.append(
+                        f"  {ws['name']} (ID: {ws['id']})\n"
+                        f"    Description: {ws.get('description', '')}\n"
+                        f"    Status: {ws.get('status', 'active')}\n"
+                    )
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"list_workspaces tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "onboard_project",
+            "Onboard a new project into a RAPIDS workspace. REQUIRED: workspace_id, name, repo_path, archetype. OPTIONAL: plugin_id.",
+            {"workspace_id": str, "name": str, "repo_path": str, "archetype": str, "plugin_id": str},
+        )
+        async def onboard_project_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for onboarding a project into RAPIDS via HTTP API"""
+            try:
+                workspace_id = args.get("workspace_id")
+                name = args.get("name")
+                repo_path = args.get("repo_path")
+                archetype = args.get("archetype")
+
+                if not all([workspace_id, name, repo_path, archetype]):
+                    return {
+                        "content": [{"type": "text", "text": "Error: workspace_id, name, repo_path, and archetype are required"}],
+                        "is_error": True,
+                    }
+
+                # Validate repo_path exists
+                if not Path(repo_path).exists():
+                    return {
+                        "content": [{"type": "text", "text": f"Error: repo_path '{repo_path}' does not exist"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/workspaces/{workspace_id}/projects",
+                        json={"name": name, "repo_path": repo_path, "archetype": archetype},
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200 or data.get("status") != "success":
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
+                        "is_error": True,
+                    }
+
+                project = data["project"]
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Onboarded project '{name}'\n"
+                            f"Project ID: {project['id']}\n"
+                            f"Workspace: {workspace_id}\n"
+                            f"Repo: {repo_path}\n"
+                            f"Archetype: {archetype}\n"
+                            f"Phases initialized: {data.get('phases_initialized', 6)}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"onboard_project tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "list_projects",
+            "List projects in a RAPIDS workspace. REQUIRED: workspace_id.",
+            {"workspace_id": str},
+        )
+        async def list_projects_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for listing projects in a workspace via HTTP API"""
+            try:
+                workspace_id = args.get("workspace_id")
+                if not workspace_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'workspace_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/workspaces/{workspace_id}/projects", timeout=15.0)
+                    data = resp.json()
+
+                projects = data.get("projects", [])
+                if not projects:
+                    return {"content": [{"type": "text", "text": "No projects found in this workspace"}]}
+
+                lines = ["Projects:\n"]
+                for p in projects:
+                    lines.append(
+                        f"  {p['name']} (ID: {p['id']})\n"
+                        f"    Repo: {p.get('repo_path', '')}\n"
+                        f"    Archetype: {p.get('archetype', '')}\n"
+                        f"    Phase: {p.get('current_phase', 'research')} [{p.get('phase_status', 'not_started')}]\n"
+                    )
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"list_projects tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "switch_project",
+            "Switch active project context. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def switch_project_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for switching the active project context via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/projects/{project_id}/switch",
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Project not found')}"}],
+                        "is_error": True,
+                    }
+
+                project = data.get("project", {})
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Switched to project '{project.get('name', project_id)}'\n"
+                            f"Working directory: {project.get('repo_path', 'N/A')}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"switch_project tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "get_project_status",
+            "Get project details with phase information. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def get_project_status_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for getting project status with phase info via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    proj_resp = await client.get(f"{_API_BASE}/api/projects/{project_id}", timeout=15.0)
+                    phase_resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/phases", timeout=15.0)
+
+                project = proj_resp.json().get("project", {})
+                phases = phase_resp.json().get("phases", [])
+
+                lines = [
+                    f"Project: {project.get('name', 'N/A')}\n",
+                    f"ID: {project_id}\n",
+                    f"Repo: {project.get('repo_path', 'N/A')}\n",
+                    f"Archetype: {project.get('archetype', 'N/A')}\n",
+                    f"Current Phase: {project.get('current_phase', 'N/A')} [{project.get('phase_status', 'N/A')}]\n",
+                    f"\nPhases:\n",
+                ]
+
+                for phase in phases:
+                    status = phase.get("status", "pending")
+                    phase_name = phase.get("phase", "unknown")
+                    lines.append(f"  [{status}] {phase_name}\n")
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"get_project_status tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "start_phase",
+            "Start a RAPIDS phase for a project. REQUIRED: project_id, phase.",
+            {"project_id": str, "phase": str},
+        )
+        async def start_phase_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for starting a RAPIDS phase via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                phase = args.get("phase")
+
+                if not project_id or not phase:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' and 'phase' are required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/projects/{project_id}/phases/{phase}/start",
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to start phase')}"}],
+                        "is_error": True,
+                    }
+
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Started phase '{phase}' for project {project_id}\n"
+                            f"Status: {data.get('status', 'success')}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"start_phase tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "complete_phase",
+            "Complete a RAPIDS phase for a project. REQUIRED: project_id, phase.",
+            {"project_id": str, "phase": str},
+        )
+        async def complete_phase_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for completing a RAPIDS phase via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                phase = args.get("phase")
+
+                if not project_id or not phase:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' and 'phase' are required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/projects/{project_id}/phases/{phase}/complete",
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to complete phase')}"}],
+                        "is_error": True,
+                    }
+
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Completed phase '{phase}' for project {project_id}\n"
+                            f"Status: {data.get('status', 'success')}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"complete_phase tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "advance_phase",
+            "Complete the current RAPIDS phase and start the next one. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def advance_phase_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for advancing to the next RAPIDS phase via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/projects/{project_id}/phases/advance",
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Failed to advance phase')}"}],
+                        "is_error": True,
+                    }
+
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Advanced phase for project {project_id}\n"
+                            f"Status: {data.get('status', 'success')}",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"advance_phase tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "list_features",
+            "List features for a RAPIDS project. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def list_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for listing features in a project via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/features", timeout=15.0)
+                    data = resp.json()
+
+                features = data.get("features", [])
+                if not features:
+                    return {"content": [{"type": "text", "text": "No features found for this project"}]}
+
+                lines = ["Features:\n"]
+                for f in features:
+                    status = f.get("status", "pending")
+                    lines.append(
+                        f"  [{status}] {f.get('name', 'unnamed')} (ID: {f['id']})\n"
+                        f"    Description: {f.get('description', '')}\n"
+                    )
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"list_features tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "create_feature",
+            "Create a feature for a RAPIDS project. REQUIRED: project_id, name, description. OPTIONAL: depends_on (comma-separated feature IDs), acceptance_criteria (comma-separated list), priority.",
+            {"project_id": str, "name": str, "description": str, "depends_on": str, "acceptance_criteria": str, "priority": str},
+        )
+        async def create_feature_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for creating a feature via HTTP API"""
+            try:
+                project_id = args.get("project_id")
+                name = args.get("name")
+                description = args.get("description", "")
+                depends_on_str = args.get("depends_on", "")
+                acceptance_criteria_str = args.get("acceptance_criteria", "")
+                priority = args.get("priority", "medium")
+
+                if not project_id or not name:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' and 'name' are required"}],
+                        "is_error": True,
+                    }
+
+                depends_on = [d.strip() for d in depends_on_str.split(",") if d.strip()] if depends_on_str else []
+                acceptance_criteria = [a.strip() for a in acceptance_criteria_str.split(",") if a.strip()] if acceptance_criteria_str else []
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{_API_BASE}/api/projects/{project_id}/features",
+                        json={
+                            "name": name,
+                            "description": description,
+                            "depends_on": depends_on,
+                            "acceptance_criteria": acceptance_criteria,
+                            "priority": priority,
+                        },
+                        timeout=15.0,
+                    )
+                    data = resp.json()
+
+                if resp.status_code != 200 or data.get("status") != "success":
+                    return {
+                        "content": [{"type": "text", "text": f"Error: {data.get('detail', 'Unknown error')}"}],
+                        "is_error": True,
+                    }
+
+                feature = data["feature"]
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Created feature '{name}'\n"
+                            f"Feature ID: {feature['id']}\n"
+                            f"Project: {project_id}\n"
+                            f"Priority: {priority}\n"
+                            f"Dependencies: {depends_on if depends_on else 'none'}\n"
+                            f"Acceptance Criteria: {len(acceptance_criteria)} item(s)",
+                        }
+                    ]
+                }
+
+            except Exception as e:
+                self.logger.error(f"create_feature tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "get_feature_dag_status",
+            "Get the feature DAG status for a project: total, completed, in-progress, ready features, completion %, critical path. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def get_feature_dag_status_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Tool for getting feature DAG status"""
+            try:
+                project_id = args.get("project_id")
+
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {"content": [{"type": "text", "text": f"Error: {data.get('detail', 'No features found')}"}]}
+
+                status = data.get("dag_status", {})
+
+                lines = [
+                    f"Feature DAG Status for project {project_id}:\n",
+                    f"  Total features: {status.get('total', 0)}\n",
+                    f"  Completed: {status.get('completed', 0)}\n",
+                    f"  In Progress: {status.get('in_progress', 0)}\n",
+                    f"  Ready (unblocked): {status.get('ready', 0)}\n",
+                    f"  Completion: {status.get('completion_pct', 0):.1f}%\n",
+                ]
+
+                critical_path = status.get("critical_path", [])
+                if critical_path:
+                    lines.append(f"  Critical Path: {' -> '.join(critical_path)}\n")
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"get_feature_dag_status tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        @tool(
+            "execute_ready_features",
+            "Execute all ready (unblocked) features from the DAG by creating a builder agent per feature. Features without dependencies run in parallel. Each agent gets fresh context with the feature spec.",
+            {
+                "project_id": str,
+                "max_parallel": int,
+            },
+        )
+        async def execute_ready_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Execute ready features by spawning builder agents in parallel"""
+            try:
+                project_id = args.get("project_id")
+                max_parallel = args.get("max_parallel", 3)
+
+                if not project_id:
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
+                        "is_error": True,
+                    }
+
+                # Get the DAG to find ready features
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
+                    data = resp.json()
+
+                if resp.status_code != 200:
+                    return {"content": [{"type": "text", "text": f"Error: {data.get('detail', 'No features found')}"}]}
+
+                # Use ready_features from DAG API (correctly computed by FeatureDAG.get_ready_features)
+                ready_feature_ids = data.get("ready_features", [])
+                dag_data = data.get("dag", {})
+                all_features = {f["id"]: f for f in dag_data.get("features", [])}
+                dag_status = data.get("dag_status", {})
+
+                if not ready_feature_ids:
+                    return {"content": [{"type": "text", "text": f"No ready features to execute. DAG: {dag_status.get('completed', 0)}/{dag_status.get('total', 0)} complete."}]}
+
+                ready_features = [all_features[fid] for fid in ready_feature_ids if fid in all_features]
+
+                # Limit parallelism
+                features_to_execute = ready_features[:max_parallel]
+                agents_created = []
+
+                # Get project info for context
+                async with httpx.AsyncClient() as client:
+                    proj_resp = await client.get(f"{_API_BASE}/api/projects/{project_id}", timeout=15.0)
+                    proj_data = proj_resp.json()
+
+                project_info = proj_data.get("project", proj_data.get("data", {}))
+                project_name = project_info.get("name", "unknown")
+                repo_path = project_info.get("repo_path", ".")
+
+                # Read project spec for context
+                spec_content = ""
+                spec_path = Path(repo_path) / ".rapids" / "plan" / "specification.md"
+                if not spec_path.exists():
+                    spec_path = Path(repo_path) / ".rapids" / "plan" / "spec.md"
+                if spec_path.exists():
+                    spec_content = spec_path.read_text()[:3000]  # Limit to 3k chars
+
+                for feature in features_to_execute:
+                    feature_id = feature.get("id", "")
+                    feature_name = feature.get("name", "unnamed")
+                    feature_desc = feature.get("description", "")
+                    acceptance = feature.get("acceptance_criteria", [])
+                    if isinstance(acceptance, list):
+                        acceptance_text = "\n".join(f"  - {c}" for c in acceptance)
+                    else:
+                        acceptance_text = str(acceptance)
+
+                    agent_name = f"builder-{feature_name}"[:40]
+
+                    # Read per-feature spec if available
+                    feature_spec = ""
+                    for spec_dir in [
+                        Path(repo_path) / ".rapids" / "plan" / "features" / feature_id,
+                        Path(repo_path) / ".rapids" / "plan" / "features" / feature_name,
+                    ]:
+                        spec_file = spec_dir / "spec.md"
+                        if spec_file.exists():
+                            feature_spec = spec_file.read_text()
+                            break
+
+                    # Build comprehensive feature prompt
+                    feature_prompt = (
+                        f"# Feature Builder Agent — {feature_name}\n\n"
+                        f"You are implementing a single feature for the **{project_name}** project.\n\n"
+                        f"## Feature\n"
+                        f"**ID:** {feature_id}\n"
+                        f"**Name:** {feature_name}\n"
+                        f"**Description:** {feature_desc}\n\n"
+                        f"## Acceptance Criteria\n{acceptance_text}\n\n"
+                        f"## Working Directory\n`{repo_path}`\n\n"
+                    )
+                    if spec_content:
+                        feature_prompt += f"## Project Specification (excerpt)\n{spec_content}\n\n"
+                    if feature_spec:
+                        feature_prompt += f"## Feature Specification\n{feature_spec}\n\n"
+                    feature_prompt += (
+                        f"## Instructions\n"
+                        f"1. Read the feature spec and acceptance criteria carefully\n"
+                        f"2. Implement the feature following project conventions\n"
+                        f"3. Write tests covering all acceptance criteria\n"
+                        f"4. Run tests and ensure they pass\n"
+                        f"5. When done, summarize what you implemented\n"
+                    )
+
+                    # Mark feature as in_progress in DAG immediately
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            await client.post(
+                                f"{_API_BASE}/api/projects/{project_id}/dag/features/{feature_id}/status",
+                                json={"status": "in_progress", "agent_name": agent_name},
+                                timeout=10.0,
+                            )
+                        await self.ws_manager.broadcast({
+                            "type": "feature_started",
+                            "data": {"project_id": project_id, "feature_id": feature_id, "feature_name": feature_name, "agent_name": agent_name}
+                        })
+                    except Exception as e:
+                        self.logger.error(f"Failed to mark feature {feature_id} in_progress: {e}")
+
+                    agents_created.append({
+                        "agent": agent_name,
+                        "feature": feature_name,
+                        "feature_id": feature_id,
+                        "status": "queued",
+                        "prompt": feature_prompt,
+                    })
+
+                # Launch all agents in parallel using asyncio tasks
+                async def _launch_builder(entry):
+                    """Create and dispatch a single builder agent."""
+                    try:
+                        result = await self.create_agent(
+                            name=entry["agent"],
+                            system_prompt=entry["prompt"],
+                            model="sonnet",
+                        )
+                        entry["status"] = "created"
+
+                        # Dispatch the implementation task in background
+                        asyncio.create_task(self.command_agent(
+                            agent_name=entry["agent"],
+                            command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
+                        ))
+                        entry["status"] = "dispatched"
+                    except Exception as e:
+                        entry["status"] = f"error: {str(e)}"
+                        await self.ws_manager.broadcast({
+                            "type": "feature_failed",
+                            "data": {"project_id": project_id, "feature_id": entry["feature_id"], "error": str(e)}
+                        })
+
+                # Launch all builders concurrently
+                await asyncio.gather(*[_launch_builder(entry) for entry in agents_created])
+
+                lines = [
+                    f"Executing {len(features_to_execute)} ready features (max_parallel={max_parallel}):\n\n",
+                ]
+                for a in agents_created:
+                    lines.append(f"  - {a['feature']} → agent '{a['agent']}' [{a['status']}]\n")
+
+                remaining = len(ready_features) - len(features_to_execute)
+                if remaining > 0:
+                    lines.append(f"\n{remaining} more features waiting (dependencies not yet met).\n")
+
+                # Broadcast DAG progress
+                total = dag_status.get("total", 0)
+                completed = dag_status.get("completed", 0)
+                in_progress = len(features_to_execute)
+                await self.ws_manager.broadcast({
+                    "type": "dag_progress",
+                    "data": {"project_id": project_id, "total": total, "completed": completed, "in_progress": in_progress}
+                })
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+
+            except Exception as e:
+                self.logger.error(f"execute_ready_features tool error: {e}", exc_info=True)
+                return {
+                    "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                    "is_error": True,
+                }
+
+        return [
+            create_agent_tool,
+            list_agents_tool,
+            command_agent_tool,
+            check_agent_status_tool,
+            delete_agent_tool,
+            interrupt_agent_tool,
+            read_system_logs_tool,
+            report_cost_tool,
+            create_workspace_tool,
+            list_workspaces_tool,
+            onboard_project_tool,
+            list_projects_tool,
+            switch_project_tool,
+            get_project_status_tool,
+            start_phase_tool,
+            complete_phase_tool,
+            advance_phase_tool,
+            list_features_tool,
+            create_feature_tool,
+            get_feature_dag_status_tool,
+            execute_ready_features_tool,
+        ]
+
+    def _create_agent_can_use_tool(self, agent_id: uuid.UUID, agent_name: str):
+        """
+        Create a can_use_tool callback for a specific agent.
+
+        Routes AskUserQuestion calls to the frontend via WebSocket,
+        waits for user answers, and returns them to the agent.
+        All other tools are auto-approved (per acceptEdits mode).
+        """
+        from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+
+        async def can_use_tool(tool_name: str, input_data: dict, context):
+            if tool_name == "AskUserQuestion":
+                self.logger.info(
+                    f"Agent '{agent_name}' asking user a question: "
+                    f"{len(input_data.get('questions', []))} questions"
+                )
+
+                # Broadcast question to frontend via WebSocket, tagged with agent info
+                await self.ws_manager.broadcast({
+                    "type": "ask_user_question",
+                    "data": {
+                        "agent_id": str(agent_id),
+                        "agent_name": agent_name,
+                        "questions": input_data.get("questions", []),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                })
+
+                # Create a future to wait for the user's answer
+                loop = asyncio.get_event_loop()
+                future = loop.create_future()
+                self._pending_agent_questions[str(agent_id)] = future
+
+                try:
+                    # Wait up to 5 minutes for user to answer
+                    answers = await asyncio.wait_for(future, timeout=300)
+                    self.logger.info(f"Agent '{agent_name}' received user answers: {list(answers.keys())}")
+
+                    return PermissionResultAllow(
+                        updated_input={
+                            "questions": input_data.get("questions", []),
+                            "answers": answers,
+                        }
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Agent '{agent_name}' question timed out")
+                    return PermissionResultDeny(
+                        message="User did not respond within 5 minutes. Continue with your best judgment."
+                    )
+                finally:
+                    self._pending_agent_questions.pop(str(agent_id), None)
+
+            # Auto-approve all other tools
+            return PermissionResultAllow(updated_input=input_data)
+
+        return can_use_tool
+
+    async def answer_agent_question(self, agent_id: str, answers: Dict[str, str]):
+        """
+        Receive user answers for a specific agent's AskUserQuestion call.
+
+        Args:
+            agent_id: UUID string of the agent that asked the question
+            answers: Dict mapping question text to selected answer labels
+        """
+        future = self._pending_agent_questions.get(agent_id)
+        if future and not future.done():
+            future.set_result(answers)
+            self.logger.info(f"Resolved pending question for agent {agent_id}")
+        else:
+            self.logger.warning(f"No pending question for agent {agent_id}")
+
+    def build_phase_agent_prompt(self, phase: str, project_id: str) -> str:
+        """
+        Build a comprehensive system prompt for a phase-specific sub-agent.
+
+        Combines: phase prompt template + plugin agent template + plugin workflow guidance + project context.
+
+        Args:
+            phase: RAPIDS phase (research, analysis, plan, implement, deploy, sustain)
+            project_id: Project UUID
+
+        Returns:
+            Complete system prompt string for the phase agent
+        """
+        parts = []
+
+        # 1. Load the phase prompt template
+        phase_prompt_path = Path(__file__).parent.parent / "prompts" / "phase_prompts" / f"{phase}_prompt.md"
+        if phase_prompt_path.exists():
+            phase_prompt = phase_prompt_path.read_text()
+        else:
+            phase_prompt = f"You are executing the **{phase.capitalize()}** phase of the RAPIDS workflow."
+            self.logger.warning(f"Phase prompt not found: {phase_prompt_path}")
+
+        # 2. Get project context for template substitution
+        project_name = "unknown"
+        repo_path = ""
+        archetype = ""
+        rapids_dir = ""
+        project_context_text = "No project context available."
+
+        if hasattr(self, 'workspace_manager') and self.workspace_manager:
+            ctx = self.workspace_manager._project_contexts.get(project_id, {})
+            project_name = ctx.get("name", "unknown")
+            repo_path = ctx.get("repo_path", "")
+            archetype = ctx.get("archetype", "")
+            rapids_dir = f"{repo_path}/.rapids"
+
+            project_context_text = (
+                f"**Project:** {project_name}\n"
+                f"**Repository:** `{repo_path}`\n"
+                f"**Archetype:** {archetype}\n"
+                f"**RAPIDS Directory:** `{rapids_dir}`\n"
+                f"**Phase Artifacts Directory:** `{rapids_dir}/{phase}/`\n"
+                f"\nAll artifacts MUST be saved to `{rapids_dir}/{phase}/`."
+            )
+
+        # Replace template variables in phase prompt
+        phase_prompt = phase_prompt.replace("{{PROJECT_NAME}}", project_name)
+        phase_prompt = phase_prompt.replace("{{PROJECT_CONTEXT}}", project_context_text)
+
+        # 3. Load plugin workflow guidance as PLUGIN_SUPPLEMENT
+        plugin_supplement = ""
+        if hasattr(self, 'plugin_loader') and self.plugin_loader and archetype:
+            try:
+                workflow_path = self.plugin_loader.plugins_dir / archetype / "workflows" / f"{phase}-workflow.md"
+                if workflow_path.exists():
+                    workflow_text = workflow_path.read_text()
+                    plugin_supplement = (
+                        f"\n## Guided Workflow ({archetype} archetype)\n\n"
+                        f"Follow this workflow structure for the {phase} phase:\n\n"
+                        f"{workflow_text}"
+                    )
+                    self.logger.info(f"Loaded workflow guidance from {workflow_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to load workflow for {phase}/{archetype}: {e}")
+
+        phase_prompt = phase_prompt.replace("{{PLUGIN_SUPPLEMENT}}", plugin_supplement)
+
+        # 4. Load plugin agent template if available (prepend its system prompt)
+        phase_agent_map = {
+            "research": "researcher",
+            "analysis": "architect",
+            "plan": "planner",
+            "implement": "feature-builder",
+            "deploy": "deployer",
+            "sustain": "monitor",
+        }
+        agent_template_name = phase_agent_map.get(phase, "")
+
+        if hasattr(self, 'plugin_loader') and self.plugin_loader and archetype and agent_template_name:
+            try:
+                agent_path = self.plugin_loader.plugins_dir / archetype / "agents" / f"{agent_template_name}.md"
+                if agent_path.exists():
+                    agent_text = agent_path.read_text()
+                    # Strip YAML frontmatter
+                    if agent_text.startswith("---"):
+                        end_idx = agent_text.find("---", 3)
+                        if end_idx != -1:
+                            agent_text = agent_text[end_idx + 3:].strip()
+                    parts.append(agent_text)
+                    parts.append("\n\n---\n\n")
+                    self.logger.info(f"Prepended plugin agent template: {agent_template_name}")
+            except Exception as e:
+                self.logger.warning(f"Failed to load agent template {agent_template_name}: {e}")
+
+        parts.append(phase_prompt)
+
+        # 5. Append existing artifacts context
+        if repo_path:
+            artifacts_dir = Path(repo_path) / ".rapids" / phase
+            if artifacts_dir.exists():
+                existing = [f.name for f in artifacts_dir.iterdir() if f.is_file()]
+                if existing:
+                    parts.append(f"\n\n## Existing Artifacts\nThese files already exist in `.rapids/{phase}/`: {', '.join(existing)}")
+
+        return "\n".join(parts)
+
+    async def create_agent(
+        self, name: str, system_prompt: str, model: Optional[str] = None, subagent_template: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new agent.
+
+        Args:
+            name: Unique agent name
+            system_prompt: Agent's system prompt (can be empty if using template)
+            model: Optional model override
+            subagent_template: Optional template name to use
+
+        Returns:
+            Dict with ok, agent_id, session_id, or error
+        """
+        try:
+            # Handle template-based creation
+            metadata = {}
+            allowed_tools = None  # Will use defaults if not specified
+
+            if subagent_template:
+                self.logger.info(f"Creating agent '{name}' using template '{subagent_template}'")
+
+                # Fetch template
+                template = self.subagent_registry.get_template(subagent_template)
+
+                if not template:
+                    # Template not found - provide helpful error
+                    available = self.subagent_registry.get_available_names()
+                    available_str = ', '.join(available) if available else 'None - create templates in .claude/agents/'
+                    self.logger.error(f"❌ Template '{subagent_template}' not found")
+                    self.logger.info(f"Available templates: {available_str}")
+                    return {
+                        "ok": False,
+                        "error": f"Template '{subagent_template}' not found. Available: {available_str}",
+                        "suggestion": "Create templates in .claude/agents/ directory or use manual agent creation"
+                    }
+
+                # Apply template configuration
+                system_prompt = template.prompt_body
+                if template.frontmatter.model:
+                    model = template.frontmatter.model
+                allowed_tools = template.frontmatter.tools
+
+                # Add template metadata
+                metadata = {
+                    "template_name": template.frontmatter.name,
+                    "template_color": template.frontmatter.color,
+                }
+
+                # Log template application
+                if template.frontmatter.tools:
+                    tool_count = len(template.frontmatter.tools)
+                    self.logger.info(f"Applying template '{template.frontmatter.name}': {tool_count} tools, model={model or 'default'}")
+                else:
+                    self.logger.info(f"Applying template '{template.frontmatter.name}': all default tools, model={model or 'default'}")
+
+            # Check if agent name already exists (scoped to this orchestrator)
+            existing = await get_agent_by_name(self.orchestrator_agent_id, name)
+            if existing:
+                self.logger.warning(f"Attempted to create agent with duplicate name: {name}")
+                return {
+                    "ok": False,
+                    "error": f"❌ Agent name '{name}' is already in use. Please choose a different name."
+                }
+
+            # Create agent in database (scoped to this orchestrator)
+            agent_id = await create_agent(
+                orchestrator_agent_id=self.orchestrator_agent_id,
+                name=name,
+                model=model or config.DEFAULT_AGENT_MODEL,
+                system_prompt=system_prompt,
+                working_dir=self.working_dir,
+                metadata=metadata,
+            )
+
+            # Initialize file tracker for this agent
+            self.file_trackers[str(agent_id)] = FileTracker(
+                agent_id, name, self.working_dir
+            )
+
+            # Initialize agent with greeting
+            task_slug = f"{name}-greeting"
+            entry_counter = {"count": 0}
+
+            hooks_dict = self._build_hooks_for_agent(
+                agent_id, name, task_slug, entry_counter
+            )
+
+            # Determine allowed tools
+            if allowed_tools is not None:
+                # Use tools from template
+                tools_to_use = allowed_tools
+            else:
+                # Default allowed tools - comprehensive set for general work
+                tools_to_use = [
+                    "Read",
+                    "Write",
+                    "Edit",
+                    "Bash",
+                    "Glob",
+                    "Grep",
+                    "Task",
+                    "WebFetch",
+                    "WebSearch",
+                    "BashOutput",
+                    "SlashCommand",
+                    "TodoWrite",
+                    "KillShell",
+                    "AskUserQuestion",
+                    "Skill",
+                ]
+
+            default_disallowed = ["NotebookEdit", "ExitPlanMode"]
+
+            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
+            env_vars = {}
+            if "ANTHROPIC_API_KEY" in os.environ:
+                env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+
+            # Only add can_use_tool for interactive agents (not builder agents)
+            # Builder agents (name starts with "builder-") run autonomously
+            agent_options = {
+                "system_prompt": system_prompt,
+                "model": model or config.DEFAULT_AGENT_MODEL,
+                "cwd": self.working_dir,
+                "hooks": hooks_dict,
+                "allowed_tools": tools_to_use,
+                "disallowed_tools": default_disallowed,
+                "permission_mode": "acceptEdits",
+                "env": env_vars,
+                "setting_sources": ["project"],
+            }
+
+            if not name.startswith("builder-"):
+                agent_options["can_use_tool"] = self._create_agent_can_use_tool(agent_id, name)
+
+            options = ClaudeAgentOptions(**agent_options)
+
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query("Ready. Awaiting instructions.")
+
+                session_id = await self._process_agent_messages(
+                    client, agent_id, name, task_slug, entry_counter
+                )
+
+            # Update session in database
+            await update_agent_session(agent_id, session_id)
+
+            # Broadcast creation
+            await self.ws_manager.broadcast_agent_created(
+                {
+                    "id": str(agent_id),
+                    "name": name,
+                    "model": model or config.DEFAULT_AGENT_MODEL,
+                    "status": "idle",
+                }
+            )
+
+            self.logger.info(f"Created agent '{name}' with ID {agent_id}")
+
+            return {"ok": True, "agent_id": str(agent_id), "session_id": session_id}
+
+        except Exception as e:
+            self.logger.error(f"Failed to create agent: {e}", exc_info=True)
+            return {"ok": False, "error": str(e)}
+
+    async def command_agent(
+        self, agent_id: uuid.UUID, command: str, task_slug: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send command to agent.
+
+        Args:
+            agent_id: UUID of agent
+            command: Command text
+            task_slug: Optional task identifier
+
+        Returns:
+            Dict with ok, task_slug, or error
+        """
+        try:
+            agent = await get_agent(agent_id)
+            if not agent:
+                return {"ok": False, "error": "Agent not found"}
+
+            # Ensure file tracker exists for this agent
+            if str(agent_id) not in self.file_trackers:
+                self.file_trackers[str(agent_id)] = FileTracker(
+                    agent_id, agent.name, agent.working_dir or self.working_dir
+                )
+
+            # Generate task slug if not provided
+            if not task_slug:
+                # Create slug from command (first 50 chars, kebab-case)
+                slug_base = re.sub(r"[^a-z0-9]+", "-", command[:50].lower()).strip("-")
+                task_slug = f"{slug_base}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+            entry_counter = {"count": 0}
+
+            # Insert prompt to database
+            prompt_id = await insert_prompt(
+                agent_id=agent_id,
+                task_slug=task_slug,
+                author="orchestrator_agent",
+                prompt_text=command,
+                session_id=agent.session_id,
+            )
+
+            # Generate AI summary in background
+            asyncio.create_task(self._summarize_and_update_prompt(prompt_id, command))
+
+            # Build hooks
+            hooks_dict = self._build_hooks_for_agent(
+                agent_id, agent.name, task_slug, entry_counter
+            )
+
+            # Default allowed tools - comprehensive set for general work
+            default_allowed = [
+                "Read",
+                "Write",
+                "Edit",
+                "Bash",
+                "Glob",
+                "Grep",
+                "Task",
+                "WebFetch",
+                "WebSearch",
+                "BashOutput",
+                "SlashCommand",
+                "TodoWrite",
+                "KillShell",
+                "AskUserQuestion",
+                "Skill",
+            ]
+
+            default_disallowed = ["NotebookEdit", "ExitPlanMode"]
+
+            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
+            env_vars = {}
+            if "ANTHROPIC_API_KEY" in os.environ:
+                env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+
+            # Build options with session resume (use Pydantic model properties)
+            options = ClaudeAgentOptions(
+                system_prompt=agent.system_prompt,
+                model=agent.model,
+                cwd=agent.working_dir,
+                resume=agent.session_id,
+                hooks=hooks_dict,
+                max_turns=config.MAX_AGENT_TURNS,
+                allowed_tools=default_allowed,
+                disallowed_tools=default_disallowed,
+                permission_mode="acceptEdits",
+                env=env_vars,  # Ensure API key is available to subprocess
+                setting_sources=["project"],  # Load CLAUDE.md and slash commands
+            )
+
+            # Update status to executing
+            await update_agent_status(agent_id, "executing")
+            await self.ws_manager.broadcast_agent_status_change(
+                str(agent_id), "idle", "executing"
+            )
+
+            # Execute agent
+            async with ClaudeSDKClient(options=options) as client:
+                # Track in active clients for interrupt
+                with self.active_clients_lock:
+                    self.active_clients[agent.name] = client
+
+                await client.query(command)
+
+                session_id = await self._process_agent_messages(
+                    client, agent_id, agent.name, task_slug, entry_counter
+                )
+
+                # Remove from active clients
+                with self.active_clients_lock:
+                    self.active_clients.pop(agent.name, None)
+
+            # Update session and status
+            await update_agent_session(agent_id, session_id)
+            await update_agent_status(agent_id, "idle")
+            await self.ws_manager.broadcast_agent_status_change(
+                str(agent_id), "executing", "idle"
+            )
+
+            self.logger.info(f"Agent '{agent.name}' completed task: {task_slug}")
+
+            return {"ok": True, "task_slug": task_slug}
+
+        except Exception as e:
+            self.logger.error(f"Failed to command agent: {e}", exc_info=True)
+            await update_agent_status(agent_id, "blocked")
+            return {"ok": False, "error": str(e)}
+
+    def _build_hooks_for_agent(
+        self,
+        agent_id: uuid.UUID,
+        agent_name: str,
+        task_slug: str,
+        entry_counter: Dict[str, int],
+    ) -> Dict[str, Any]:
+        """
+        Build hooks dictionary for agent.
+
+        Args:
+            agent_id: UUID of agent
+            agent_name: Name of the agent
+            task_slug: Task identifier
+            entry_counter: Mutable counter dict
+
+        Returns:
+            Hooks dict for ClaudeAgentOptions
+        """
+        # Get file tracker for this agent
+        file_tracker = self.file_trackers.get(str(agent_id))
+
+        # Build PostToolUse hooks list
+        post_tool_hooks = [
+            create_post_tool_hook(
+                agent_id,
+                agent_name,
+                task_slug,
+                entry_counter,
+                self.logger,
+                self.ws_manager,
+            )
+        ]
+
+        # Add file tracking hook if file_tracker exists
+        if file_tracker:
+            post_tool_hooks.append(
+                create_post_tool_file_tracking_hook(
+                    file_tracker,
+                    agent_id,
+                    agent_name,
+                    self.logger,
+                )
+            )
+
+        return {
+            "PreToolUse": [
+                HookMatcher(
+                    hooks=[
+                        create_pre_tool_hook(
+                            agent_id,
+                            agent_name,
+                            task_slug,
+                            entry_counter,
+                            self.logger,
+                            self.ws_manager,
+                        )
+                    ]
+                )
+            ],
+            "PostToolUse": [HookMatcher(hooks=post_tool_hooks)],
+            "UserPromptSubmit": [
+                HookMatcher(
+                    hooks=[
+                        create_user_prompt_hook(
+                            agent_id,
+                            agent_name,
+                            task_slug,
+                            entry_counter,
+                            self.logger,
+                            self.ws_manager,
+                        )
+                    ]
+                )
+            ],
+            "Stop": [
+                HookMatcher(
+                    hooks=[
+                        create_stop_hook(
+                            agent_id,
+                            agent_name,
+                            task_slug,
+                            entry_counter,
+                            self.logger,
+                            self.ws_manager,
+                        )
+                    ]
+                )
+            ],
+            "SubagentStop": [
+                HookMatcher(
+                    hooks=[
+                        create_subagent_stop_hook(
+                            agent_id,
+                            agent_name,
+                            task_slug,
+                            entry_counter,
+                            self.logger,
+                            self.ws_manager,
+                        )
+                    ]
+                )
+            ],
+            "PreCompact": [
+                HookMatcher(
+                    hooks=[
+                        create_pre_compact_hook(
+                            agent_id,
+                            agent_name,
+                            task_slug,
+                            entry_counter,
+                            self.logger,
+                            self.ws_manager,
+                        )
+                    ]
+                )
+            ],
+        }
+
+    async def _process_agent_messages(
+        self,
+        client: ClaudeSDKClient,
+        agent_id: uuid.UUID,
+        agent_name: str,
+        task_slug: str,
+        entry_counter: Dict[str, int],
+    ) -> Optional[str]:
+        """
+        Process agent messages and log to database.
+
+        Args:
+            client: Claude SDK client
+            agent_id: UUID of agent
+            agent_name: Name of agent
+            task_slug: Task identifier
+            entry_counter: Mutable counter
+
+        Returns:
+            Final session_id
+        """
+        session_id = None
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost = 0.0
+        estimated_output_chars = 0  # Track chars for incremental token estimate
+        last_text_block_id = None  # Track last TextBlock for file tracking attachment
+        text_block_count = 0
+        thinking_block_count = 0
+        tool_use_block_count = 0
+
+        try:
+            self.logger.debug(f"[AgentManager] Starting message processing for agent={agent_name} task={task_slug}")
+            async for message in client.receive_response():
+                self.logger.debug(f"[AgentManager] Received message type: {type(message).__name__}")
+
+                if isinstance(message, SystemMessage):
+                    # SystemMessage has subtype and data fields (not content)
+                    # Log it with full details to understand what's happening
+                    subtype = getattr(message, 'subtype', 'unknown')
+                    data = getattr(message, 'data', {})
+
+                    self.logger.warning(
+                        f"[AgentManager] SystemMessage received for agent={agent_name} task={task_slug}:\n"
+                        f"  Subtype: {subtype}\n"
+                        f"  Data: {data}\n"
+                    )
+
+                    # SystemMessages are informational - log but don't process as agent output
+                    continue
+
+                if isinstance(message, AssistantMessage):
+                    self.logger.debug(f"[AgentManager] AssistantMessage has {len(message.content)} blocks")
+                    for block in message.content:
+                        entry_index = entry_counter["count"]
+                        entry_counter["count"] += 1
+                        self.logger.debug(f"[AgentManager] Processing block type: {type(block).__name__}")
+
+                        if isinstance(block, TextBlock):
+                            text_block_count += 1
+                            block_id = await insert_message_block(
+                                agent_id=agent_id,
+                                task_slug=task_slug,
+                                entry_index=entry_index,
+                                block_type="text",
+                                content=block.text,
+                                payload={"text": block.text},
+                            )
+
+                            # Track this as the last TextBlock for file tracking attachment
+                            last_text_block_id = block_id
+
+                            # Spawn async summarization
+                            asyncio.create_task(
+                                self._summarize_and_update_block(
+                                    block_id, agent_id, "text", {"content": block.text}
+                                )
+                            )
+
+                            # Broadcast agent text response via WebSocket
+                            await self.ws_manager.broadcast_agent_log(
+                                {
+                                    "id": str(block_id),
+                                    "agent_id": str(agent_id),
+                                    "agent_name": agent_name,
+                                    "task_slug": task_slug,
+                                    "entry_index": entry_index,
+                                    "event_category": "response",
+                                    "event_type": "TextBlock",
+                                    "content": block.text,
+                                    "summary": block.text,
+                                    "payload": {"text": block.text},
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                            self.logger.debug(
+                                f"Broadcast TextBlock for agent {agent_name}"
+                            )
+
+                            # Accumulate chars for incremental token estimate
+                            estimated_output_chars += len(block.text)
+
+                        elif isinstance(block, ThinkingBlock):
+                            thinking_block_count += 1
+                            block_id = await insert_message_block(
+                                agent_id=agent_id,
+                                task_slug=task_slug,
+                                entry_index=entry_index,
+                                block_type="thinking",
+                                content=block.thinking,
+                                payload={"thinking": block.thinking},
+                            )
+
+                            # Spawn async summarization
+                            asyncio.create_task(
+                                self._summarize_and_update_block(
+                                    block_id,
+                                    agent_id,
+                                    "thinking",
+                                    {"content": block.thinking},
+                                )
+                            )
+
+                            # Accumulate chars for token estimate
+                            estimated_output_chars += len(block.thinking)
+
+                            # Broadcast agent thinking via WebSocket
+                            await self.ws_manager.broadcast_agent_log(
+                                {
+                                    "id": str(block_id),
+                                    "agent_id": str(agent_id),
+                                    "agent_name": agent_name,
+                                    "task_slug": task_slug,
+                                    "entry_index": entry_index,
+                                    "event_category": "response",
+                                    "event_type": "ThinkingBlock",
+                                    "content": block.thinking,
+                                    "summary": "[Agent is thinking]",
+                                    "payload": {"thinking": block.thinking},
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                            self.logger.debug(
+                                f"Broadcast ThinkingBlock for agent {agent_name}"
+                            )
+
+                        elif isinstance(block, ToolUseBlock):
+                            tool_use_block_count += 1
+                            block_id = await insert_message_block(
+                                agent_id=agent_id,
+                                task_slug=task_slug,
+                                entry_index=entry_index,
+                                block_type="tool_use",
+                                content=None,
+                                payload={
+                                    "tool_name": block.name,
+                                    "tool_input": block.input,
+                                    "tool_use_id": block.id,
+                                },
+                            )
+
+                            # Spawn async summarization
+                            asyncio.create_task(
+                                self._summarize_and_update_block(
+                                    block_id,
+                                    agent_id,
+                                    "tool_use",
+                                    {
+                                        "tool_name": block.name,
+                                        "tool_input": block.input,
+                                    },
+                                )
+                            )
+
+                            # Broadcast agent tool use via WebSocket
+                            await self.ws_manager.broadcast_agent_log(
+                                {
+                                    "id": str(block_id),
+                                    "agent_id": str(agent_id),
+                                    "agent_name": agent_name,
+                                    "task_slug": task_slug,
+                                    "entry_index": entry_index,
+                                    "event_category": "response",
+                                    "event_type": "ToolUseBlock",
+                                    "content": f"[Tool] {block.name}",
+                                    "summary": f"Using tool: {block.name}",
+                                    "payload": {
+                                        "tool_name": block.name,
+                                        "tool_input": block.input,
+                                        "tool_use_id": block.id,
+                                    },
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                            # Broadcast incremental token estimate every few tool calls
+                            estimated_output_chars += len(str(block.input))
+                            if tool_use_block_count % 3 == 0:
+                                est_tokens = estimated_output_chars // 4  # ~4 chars per token
+                                await self.ws_manager.broadcast_agent_updated(
+                                    agent_id=str(agent_id),
+                                    agent_data={
+                                        "input_tokens": est_tokens,  # Rough estimate
+                                        "output_tokens": est_tokens,
+                                        "total_cost": est_tokens * 0.000003 * 2,  # Rough sonnet pricing
+                                    }
+                                )
+
+                            self.logger.debug(
+                                f"Broadcast ToolUseBlock for agent {agent_name}"
+                            )
+
+                elif isinstance(message, ResultMessage):
+                    session_id = message.session_id
+                    self.logger.info(
+                        f"[ResultMessage] Agent={agent_name} "
+                        f"total_cost_usd={getattr(message, 'total_cost_usd', 'N/A')} "
+                        f"usage={message.usage} "
+                        f"num_turns={getattr(message, 'num_turns', 'N/A')} "
+                        f"is_error={getattr(message, 'is_error', 'N/A')}"
+                    )
+
+                    # Capture file changes for this agent and broadcast as separate event
+                    file_tracker = self.file_trackers.get(str(agent_id))
+                    if file_tracker and last_text_block_id:
+                        try:
+                            # Generate summaries (async)
+                            modified_files_summary = (
+                                await file_tracker.generate_file_changes_summary()
+                            )
+                            read_files_summary = (
+                                file_tracker.generate_read_files_summary()
+                            )
+
+                            # Only broadcast if there are file operations
+                            if modified_files_summary or read_files_summary:
+                                # Import Pydantic model for type safety
+                                from .file_tracker import AgentLogMetadata
+                                import uuid
+
+                                # Build metadata using Pydantic model
+                                file_metadata = AgentLogMetadata(
+                                    file_changes=modified_files_summary,
+                                    read_files=read_files_summary,
+                                    total_files_modified=len(modified_files_summary),
+                                    total_files_read=len(read_files_summary),
+                                    generated_at=datetime.now(timezone.utc).isoformat(),
+                                )
+
+                                # IMPORTANT: Update the TextBlock in database with file tracking data
+                                # This ensures file changes persist and show up on page refresh
+                                from .database import update_log_payload
+                                await update_log_payload(
+                                    last_text_block_id,
+                                    file_metadata.model_dump()
+                                )
+
+                                # Broadcast as separate FileTrackingBlock event for real-time WebSocket updates
+                                await self.ws_manager.broadcast_agent_log(
+                                    {
+                                        "id": str(uuid.uuid4()),  # New unique ID for this event
+                                        "parent_log_id": str(last_text_block_id),  # Link to parent TextBlock
+                                        "agent_id": str(agent_id),
+                                        "agent_name": agent_name,
+                                        "task_slug": task_slug,
+                                        "event_category": "file_tracking",
+                                        "event_type": "FileTrackingBlock",
+                                        "content": f"📂 {len(modified_files_summary)} modified, {len(read_files_summary)} read",
+                                        "summary": f"File tracking: {len(modified_files_summary)} modified, {len(read_files_summary)} read",
+                                        "payload": file_metadata.model_dump(),
+                                        "timestamp": datetime.now(
+                                            timezone.utc
+                                        ).isoformat(),
+                                    }
+                                )
+
+                                self.logger.info(
+                                    f"[FileTracker] Agent={agent_name} Modified={len(modified_files_summary)} Read={len(read_files_summary)} | Stored in DB"
+                                )
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error capturing file changes: {e}", exc_info=True
+                            )
+
+                    # Extract cost from top-level field first (preferred)
+                    total_cost = getattr(message, "total_cost_usd", None) or 0.0
+
+                    # Extract token counts from usage dict/object
+                    if message.usage:
+                        usage = message.usage
+                        if isinstance(usage, dict):
+                            total_input_tokens = usage.get("input_tokens", 0)
+                            total_output_tokens = usage.get("output_tokens", 0)
+                            # Fall back to usage cost if top-level is None/0.0
+                            if total_cost == 0.0:
+                                total_cost = usage.get("total_cost_usd", 0.0)
+                        else:
+                            total_input_tokens = getattr(usage, "input_tokens", 0)
+                            total_output_tokens = getattr(usage, "output_tokens", 0)
+                            # Fall back to usage cost if top-level is None/0.0
+                            if total_cost == 0.0:
+                                total_cost = getattr(usage, "total_cost_usd", 0.0)
+
+            # Update costs in database
+            self.logger.info(
+                f"[CostUpdate] Agent={agent_name} in={total_input_tokens} out={total_output_tokens} cost=${total_cost:.4f}"
+            )
+            if total_input_tokens or total_output_tokens:
+                await update_agent_costs(
+                    agent_id, total_input_tokens, total_output_tokens, total_cost
+                )
+
+                # Fetch updated agent to get cumulative totals
+                updated_agent = await get_agent(agent_id)
+
+                if updated_agent:
+                    # Broadcast updated token/cost data to frontend
+                    await self.ws_manager.broadcast_agent_updated(
+                        agent_id=str(agent_id),
+                        agent_data={
+                            "input_tokens": updated_agent.input_tokens,
+                            "output_tokens": updated_agent.output_tokens,
+                            "total_cost": float(updated_agent.total_cost)
+                        }
+                    )
+
+                    self.logger.debug(
+                        f"Broadcast token update for agent {updated_agent.name} ({agent_id}): "
+                        f"in={updated_agent.input_tokens}, out={updated_agent.output_tokens}, "
+                        f"cost=${float(updated_agent.total_cost):.4f}"
+                    )
+
+        except Exception as e:
+            self.logger.error(f"Error processing agent messages: {e}", exc_info=True)
+            raise  # Re-raise to let command_agent handle the error properly
+
+        finally:
+            # Log summary of what we processed
+            self.logger.info(
+                f"[AgentManager] Processed agent={agent_name} task={task_slug}: "
+                f"TextBlocks={text_block_count}, ThinkingBlocks={thinking_block_count}, "
+                f"ToolUseBlocks={tool_use_block_count}"
+            )
+
+        return session_id
+
+    # ═══════════════════════════════════════════════════════════
+    # HELPER METHODS - AI Summarization
+    # ═══════════════════════════════════════════════════════════
+
+    async def _summarize_and_update_prompt(
+        self, prompt_id: uuid.UUID, prompt_text: str
+    ) -> None:
+        """
+        Generate AI summary for prompt and update database (background task).
+
+        Args:
+            prompt_id: UUID of the prompt to update
+            prompt_text: The prompt text content
+        """
+        try:
+            # Build event data for summarization
+            event_data = {"prompt": prompt_text}
+
+            # Generate AI summary (uses Claude Haiku for speed/cost)
+            summary = await summarize_event(event_data, "UserPromptSubmit")
+
+            # Update database with summary (only if non-empty)
+            if summary and summary.strip():
+                await update_prompt_summary(prompt_id, summary)
+                self.logger.debug(
+                    f"[AgentManager:Summary] Generated summary for prompt_id={prompt_id}: {summary}"
+                )
+            else:
+                self.logger.warning(
+                    f"[AgentManager:Summary] Empty summary for prompt_id={prompt_id}"
+                )
+
+        except Exception as e:
+            self.logger.error(
+                f"[AgentManager:Summary] Failed for prompt_id={prompt_id}: {e}"
+            )
+
+    async def _summarize_and_update_block(
+        self,
+        block_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        block_type: str,
+        event_data: Dict[str, Any],
+    ) -> None:
+        """
+        Generate AI summary for message block and update database (background task).
+
+        Args:
+            block_id: UUID of the block to update
+            agent_id: UUID of the agent this block belongs to
+            block_type: Type of block (text, thinking, tool_use)
+            event_data: Event data for summarization
+        """
+        try:
+            # Generate AI summary (uses Claude Haiku for speed/cost)
+            summary = await summarize_event(event_data, block_type)
+
+            # Update database with summary (only if non-empty)
+            if summary and summary.strip():
+                await update_log_summary(block_id, summary)
+                self.logger.debug(
+                    f"[AgentManager:Summary] Generated summary for block_id={block_id}: {summary}"
+                )
+
+                # Broadcast the latest summary for this agent to frontend
+                await self.ws_manager.broadcast_agent_summary_update(
+                    agent_id=str(agent_id), summary=summary
+                )
+            else:
+                self.logger.warning(
+                    f"[AgentManager:Summary] Empty summary for block_id={block_id}"
+                )
+
+        except Exception as e:
+            self.logger.error(
+                f"[AgentManager:Summary] Failed for block_id={block_id}: {e}"
+            )
