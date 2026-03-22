@@ -1598,7 +1598,9 @@ class AgentManager:
             project_name = ctx.get("name", "unknown")
             repo_path = ctx.get("repo_path", "")
             archetype = ctx.get("archetype", "")
-            plugin_name = ctx.get("plugin_id", archetype)
+            # Resolve plugin_name: prefer plugin_id, fall back to archetype
+            raw_plugin = ctx.get("plugin_id", "") or ""
+            plugin_name = raw_plugin if raw_plugin and raw_plugin.lower() != "none" else archetype
             rapids_dir = f"{repo_path}/.rapids"
 
             project_context_text = (
@@ -1614,6 +1616,11 @@ class AgentManager:
         # ── 2. Try plugin agent template FIRST (plugin-driven) ──
         plugin_agent_used = False
         plugin_registry = getattr(self, 'plugin_registry', None)
+
+        self.logger.info(
+            f"[build_phase_agent_prompt] plugin_registry={plugin_registry is not None}, "
+            f"plugin_name='{plugin_name}', archetype='{archetype}', project_name='{project_name}'"
+        )
 
         if plugin_registry and plugin_name:
             # Get the plugin's default agents for this phase
@@ -1667,7 +1674,39 @@ class AgentManager:
 
         parts.append(phase_prompt)
 
-        # 5. Append existing artifacts context
+        # ── 5. Enumerate available skills from plugin for agent awareness ──
+        if plugin_registry and plugin_name:
+            caps = plugin_registry.list_capabilities(plugin_name)
+            if caps and caps.skills:
+                skills_section = ["\n\n## Available Skills"]
+                skills_section.append(
+                    "You have access to the following skills via the Skill tool. "
+                    "Use them when they match your current task — invoke with `/plugin:skill-name` "
+                    "or let Claude auto-invoke based on context.\n"
+                )
+                for skill_name in caps.skills:
+                    # Read the skill description from SKILL.md frontmatter
+                    skill_desc = ""
+                    skill_dir = plugin_registry.get_plugin_dir(plugin_name)
+                    if skill_dir:
+                        skill_md = skill_dir / "skills" / skill_name / "SKILL.md"
+                        if skill_md.exists():
+                            try:
+                                content = skill_md.read_text()
+                                if content.startswith("---"):
+                                    fm_end = content.find("---", 3)
+                                    if fm_end != -1:
+                                        import yaml as _yaml
+                                        fm = _yaml.safe_load(content[3:fm_end])
+                                        skill_desc = fm.get("description", "") if isinstance(fm, dict) else ""
+                            except Exception:
+                                pass
+                    skills_section.append(f"- **/{plugin_name}:{skill_name}** — {skill_desc}")
+
+                parts.append("\n".join(skills_section))
+                self.logger.info(f"Injected {len(caps.skills)} skill descriptions into agent prompt")
+
+        # 6. Append existing artifacts context
         if repo_path:
             artifacts_dir = Path(repo_path) / ".rapids" / phase
             if artifacts_dir.exists():
