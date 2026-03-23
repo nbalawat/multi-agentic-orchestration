@@ -254,6 +254,21 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  /**
+   * Refresh project list for the active workspace (updates phase/status)
+   */
+  async function refreshProjects() {
+    if (activeWorkspaceId.value) {
+      try {
+        const data = await workspaceService.listProjects(activeWorkspaceId.value)
+        projects.value = data.projects ?? data
+      } catch (err) {
+        // Silent refresh — don't set error state
+        console.debug('Silent project refresh failed:', err)
+      }
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════
   // INITIALIZATION
   // ═══════════════════════════════════════════════════════════
@@ -292,6 +307,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     // Load plugins
     await fetchPlugins()
 
+    // Start periodic project refresh (keeps phase/status up to date)
+    setInterval(refreshProjects, 10000)
+
     console.log('Workspace store initialized')
   }
 
@@ -323,6 +341,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     onboardProject,
     switchProject,
     fetchPlugins,
+    refreshProjects,
     initialize
   }
 })
