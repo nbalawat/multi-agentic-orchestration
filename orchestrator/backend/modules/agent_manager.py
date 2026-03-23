@@ -123,6 +123,10 @@ class AgentManager:
         # Per-agent pending question futures (keyed by agent_id string)
         self._pending_agent_questions: Dict[str, asyncio.Future] = {}
 
+        # Builder agent registry: tracks feature-to-agent mappings for auto-merge
+        # Key: agent_name, Value: {feature_id, project_id, repo_path, worktree_path, worktree_branch}
+        self._builder_registry: Dict[str, Dict[str, str]] = {}
+
         # RAPIDS workspace/plugin managers (optional, set after init)
         self.workspace_manager: Optional['WorkspaceManager'] = None
         self.plugin_loader: Optional['PluginLoader'] = None
@@ -1405,11 +1409,27 @@ class AgentManager:
                         entry["status"] = "created"
 
                         # Dispatch the implementation task in background
-                        asyncio.create_task(self.command_agent(
-                            agent_name=entry["agent"],
-                            command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
-                        ))
+                        # command_agent takes agent_id (UUID), not agent_name
+                        # Use the command_agent_by_name helper which resolves name → id
+                        agent_id_for_dispatch = result.get("agent_id") if isinstance(result, dict) else None
+                        if agent_id_for_dispatch:
+                            asyncio.create_task(self.command_agent(
+                                agent_id=uuid.UUID(agent_id_for_dispatch),
+                                command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
+                            ))
                         entry["status"] = "dispatched"
+
+                        # Register builder for auto-merge on completion
+                        self._builder_registry[entry["agent"]] = {
+                            "feature_id": entry["feature_id"],
+                            "feature_name": entry["feature"],
+                            "project_id": project_id,
+                            "repo_path": repo_path,
+                            "worktree_path": worktree_path or "",
+                            "worktree_branch": worktree_branch or "",
+                        }
+                        self.logger.info(f"Registered builder '{entry['agent']}' for auto-merge (feature={entry['feature_id']}, branch={worktree_branch})")
+
                     except Exception as e:
                         entry["status"] = f"error: {str(e)}"
                         await self.ws_manager.broadcast({
@@ -1838,12 +1858,14 @@ class AgentManager:
                 }
 
             # Create agent in database (scoped to this orchestrator)
+            # Use worktree path as working_dir if available (for parallel feature isolation)
+            db_working_dir = metadata.get("worktree_path", self.working_dir)
             agent_id = await create_agent(
                 orchestrator_agent_id=self.orchestrator_agent_id,
                 name=name,
                 model=model or config.DEFAULT_AGENT_MODEL,
                 system_prompt=system_prompt,
-                working_dir=self.working_dir,
+                working_dir=db_working_dir,
                 metadata=metadata,
             )
 
@@ -2078,12 +2100,170 @@ class AgentManager:
 
             self.logger.info(f"Agent '{agent.name}' completed task: {task_slug}")
 
+            # ── Auto-merge for builder agents ──
+            builder_info = self._builder_registry.get(agent.name)
+            if builder_info and builder_info.get("worktree_path"):
+                asyncio.create_task(
+                    self._auto_merge_and_progress(agent.name, builder_info)
+                )
+
             return {"ok": True, "task_slug": task_slug}
 
         except Exception as e:
             self.logger.error(f"Failed to command agent: {e}", exc_info=True)
             await update_agent_status(agent_id, "blocked")
             return {"ok": False, "error": str(e)}
+
+    async def _auto_merge_and_progress(self, agent_name: str, builder_info: Dict[str, str]):
+        """
+        Auto-merge a completed builder's worktree branch and trigger next wave.
+
+        Steps:
+        1. Merge the feature branch (rapids/<feature-id>) into main
+        2. Update the feature status in the DAG to 'complete'
+        3. Clean up the worktree
+        4. Check for newly unblocked features
+        5. Launch next wave if features are ready
+        6. Broadcast progress to frontend
+        """
+        from .git_worktree import GitWorktreeManager
+        import httpx
+
+        feature_id = builder_info["feature_id"]
+        feature_name = builder_info.get("feature_name", feature_id)
+        project_id = builder_info["project_id"]
+        repo_path = builder_info["repo_path"]
+        worktree_branch = builder_info.get("worktree_branch", "")
+
+        self.logger.info(f"[AutoMerge] Starting merge for feature '{feature_id}' (branch: {worktree_branch})")
+
+        # 1. Merge worktree branch back to main
+        merge_success = False
+        merge_message = ""
+        try:
+            git_mgr = GitWorktreeManager(repo_path)
+            success, msg = git_mgr.merge_worktree(feature_id, delete_after=True)
+            merge_success = success
+            merge_message = msg
+            if success:
+                self.logger.info(f"[AutoMerge] Merged '{feature_id}': {msg}")
+            else:
+                self.logger.warning(f"[AutoMerge] Merge conflict for '{feature_id}': {msg}")
+        except Exception as e:
+            merge_message = f"Merge failed: {e}"
+            self.logger.error(f"[AutoMerge] Merge exception for '{feature_id}': {e}")
+
+        # 2. Update feature status in DAG
+        _API_BASE = f"http://127.0.0.1:{config.BACKEND_PORT}"
+        try:
+            async with httpx.AsyncClient() as client:
+                new_status = "complete" if merge_success else "blocked"
+                await client.post(
+                    f"{_API_BASE}/api/projects/{project_id}/dag/features/{feature_id}/status",
+                    json={"status": new_status},
+                    timeout=10.0,
+                )
+                self.logger.info(f"[AutoMerge] DAG updated: {feature_id} → {new_status}")
+        except Exception as e:
+            self.logger.error(f"[AutoMerge] Failed to update DAG for '{feature_id}': {e}")
+
+        # 3. Broadcast merge result to frontend
+        await self.ws_manager.broadcast({
+            "type": "feature_merged" if merge_success else "feature_merge_failed",
+            "data": {
+                "project_id": project_id,
+                "feature_id": feature_id,
+                "feature_name": feature_name,
+                "agent_name": agent_name,
+                "branch": worktree_branch,
+                "message": merge_message,
+                "success": merge_success,
+            }
+        })
+
+        # 4. Clean up builder registry
+        self._builder_registry.pop(agent_name, None)
+
+        # 5. Check for newly unblocked features and launch next wave
+        if merge_success:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{_API_BASE}/api/projects/{project_id}/dag",
+                        timeout=10.0,
+                    )
+                    dag_data = resp.json()
+
+                ready_features = dag_data.get("ready_features", [])
+                dag_status = dag_data.get("dag_status", {})
+                total = dag_status.get("total", 0)
+                completed = dag_status.get("completed", 0)
+                in_progress = dag_status.get("in_progress", 0)
+
+                self.logger.info(
+                    f"[AutoMerge] DAG progress: {completed}/{total} complete, "
+                    f"{in_progress} in progress, {len(ready_features)} ready"
+                )
+
+                # Broadcast progress
+                await self.ws_manager.broadcast({
+                    "type": "dag_progress",
+                    "data": {
+                        "project_id": project_id,
+                        "total": total,
+                        "completed": completed,
+                        "in_progress": in_progress,
+                        "ready": len(ready_features),
+                    }
+                })
+
+                # If there are ready features and no running builders, launch next wave
+                running_builders = len([
+                    b for b in self._builder_registry.values()
+                    if b["project_id"] == project_id
+                ])
+
+                if ready_features and running_builders == 0:
+                    self.logger.info(
+                        f"[AutoMerge] Wave complete! Launching next wave: "
+                        f"{len(ready_features)} features ready"
+                    )
+                    # Broadcast wave transition
+                    await self.ws_manager.broadcast({
+                        "type": "wave_transition",
+                        "data": {
+                            "project_id": project_id,
+                            "completed_feature": feature_id,
+                            "next_features": ready_features,
+                            "total": total,
+                            "completed": completed,
+                        }
+                    })
+
+                    # Auto-launch next wave (reuse the orchestrator's execute_ready_features)
+                    # We trigger this by sending a message to the orchestrator
+                    await self.ws_manager.broadcast({
+                        "type": "system_log",
+                        "data": {
+                            "level": "INFO",
+                            "message": f"Wave complete! {len(ready_features)} features ready for next wave. "
+                                       f"DAG: {completed}/{total} complete.",
+                        }
+                    })
+
+                elif completed == total:
+                    self.logger.info(f"[AutoMerge] All features complete! DAG 100%")
+                    await self.ws_manager.broadcast({
+                        "type": "dag_complete",
+                        "data": {
+                            "project_id": project_id,
+                            "total": total,
+                            "message": f"All {total} features implemented and merged!",
+                        }
+                    })
+
+            except Exception as e:
+                self.logger.error(f"[AutoMerge] Failed to check next wave: {e}")
 
     def _build_hooks_for_agent(
         self,
