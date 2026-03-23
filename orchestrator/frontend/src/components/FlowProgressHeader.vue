@@ -2,6 +2,7 @@
   <div class="flow-progress-header">
     <div class="progress-title">
       <span class="title-text">IMPLEMENTATION FLOW</span>
+      <span v-if="projectName" class="project-name-badge">{{ projectName }}</span>
       <span v-if="dagComplete" class="complete-badge">ALL COMPLETE</span>
     </div>
     <div class="progress-stats">
@@ -27,6 +28,7 @@ import type { FlowProgress } from '../stores/implementFlowStore'
 defineProps<{
   progress: FlowProgress
   dagComplete: boolean
+  projectName?: string
 }>()
 </script>
 
@@ -49,6 +51,16 @@ defineProps<{
   font-weight: 700;
   letter-spacing: 1.5px;
   color: #8b949e;
+}
+
+.project-name-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #22d3ee;
+  background: rgba(34, 211, 238, 0.1);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
 }
 
 .complete-badge {

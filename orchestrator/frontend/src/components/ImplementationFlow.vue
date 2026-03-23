@@ -3,6 +3,7 @@
     <FlowProgressHeader
       :progress="flowStore.progress"
       :dag-complete="flowStore.dagComplete"
+      :project-name="workspaceStore.activeProject?.name"
     />
 
     <div class="flow-columns">

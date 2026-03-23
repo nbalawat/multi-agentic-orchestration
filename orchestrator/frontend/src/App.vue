@@ -118,19 +118,22 @@ const isSidebarCollapsed = ref(false)
 // Center column tab: 'events' or 'flow'
 const centerView = ref<'events' | 'flow'>('events')
 const selectedFlowFeature = ref<any>(null)
-// Show flow tab if project is in implement phase OR user is already viewing flow
+// Show flow tab only when active project is in implement phase
 const showFlowTab = computed(() => {
-  if (centerView.value === 'flow') return true  // never hide while viewing
   const phase = workspaceStore.activeProject?.current_phase
   return phase === 'implement'
 })
 
 const flowStore = useImplementFlowStore()
 
-// Auto-switch to flow when entering implement phase (one-time)
-watch(() => workspaceStore.activeProject?.current_phase, (phase) => {
-  if (phase === 'implement' && centerView.value === 'events') {
+// When project changes or phase changes: auto-switch tabs
+watch([() => workspaceStore.activeProjectId, () => workspaceStore.activeProject?.current_phase], ([newProjectId, newPhase]) => {
+  if (newPhase === 'implement') {
     centerView.value = 'flow'
+  } else {
+    // Not in implement phase — switch to events, clear flow store
+    centerView.value = 'events'
+    flowStore.reset()
   }
 })
 
