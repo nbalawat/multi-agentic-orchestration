@@ -38,12 +38,16 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, watch, toRef } from 'vue'
 import { useImplementFlowStore, STAGE_COLUMNS } from '../stores/implementFlowStore'
 import type { FlowStage } from '../stores/implementFlowStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import FlowFeatureCard from './FlowFeatureCard.vue'
 import FlowProgressHeader from './FlowProgressHeader.vue'
+
+const props = defineProps<{
+  visible?: boolean
+}>()
 
 const flowStore = useImplementFlowStore()
 const workspaceStore = useWorkspaceStore()
@@ -62,12 +66,19 @@ function onFeatureClick(featureId: string) {
   emit('select-feature', featureId)
 }
 
-// Always fetch fresh data on mount (component uses v-if so this runs each time)
-onMounted(async () => {
+async function loadData() {
   const projectId = workspaceStore.activeProjectId
   if (projectId) {
     await flowStore.initializeFromDag(projectId)
   }
+}
+
+// Load on mount
+onMounted(() => { loadData() })
+
+// Re-load every time the panel becomes visible
+watch(() => props.visible, (isVisible) => {
+  if (isVisible) { loadData() }
 })
 </script>
 

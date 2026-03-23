@@ -53,6 +53,7 @@
         </div>
         <div class="center-panel" :class="{ 'panel-visible': centerView === 'flow' }">
           <ImplementationFlow
+            :visible="centerView === 'flow'"
             @select-feature="handleFeatureSelect"
           />
         </div>
