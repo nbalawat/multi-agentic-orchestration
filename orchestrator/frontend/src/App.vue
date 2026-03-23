@@ -9,14 +9,22 @@
             'chat-md': store.chatWidth === 'md',
             'chat-lg': store.chatWidth === 'lg'
           }">
-      <AgentList
+      <WorkspaceSidebar
         class="app-sidebar left"
-        :agents="store.allAgentsWithOrchestrator"
-        :selected-agent-id="store.selectedAgentId"
-        @select-agent="handleSelectAgent"
-        @add-agent="handleAddAgent"
-        @collapse-change="handleSidebarCollapse"
-      />
+        :collapsed="isSidebarCollapsed"
+        @select-project="handleSelectProject"
+        @onboard-project="handleOnboardProject"
+      >
+        <template #agent-list>
+          <AgentList
+            :agents="store.allAgentsWithOrchestrator"
+            :selected-agent-id="store.selectedAgentId"
+            @select-agent="handleSelectAgent"
+            @add-agent="handleAddAgent"
+            @collapse-change="handleSidebarCollapse"
+          />
+        </template>
+      </WorkspaceSidebar>
 
       <EventStream
         ref="eventStreamRef"
@@ -51,16 +59,19 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import AgentList from './components/AgentList.vue'
+import WorkspaceSidebar from './components/WorkspaceSidebar.vue'
 import EventStream from './components/EventStream.vue'
 import OrchestratorChat from './components/OrchestratorChat.vue'
 import QuestionPanel from './components/QuestionPanel.vue'
 import ProjectContextBar from './components/ProjectContextBar.vue'
 import GlobalCommandInput from './components/GlobalCommandInput.vue'
 import { useOrchestratorStore } from './stores/orchestratorStore'
+import { useWorkspaceStore } from './stores/workspaceStore'
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts'
 
 // Use Pinia store
 const store = useOrchestratorStore()
+const workspaceStore = useWorkspaceStore()
 
 // Initialize keyboard shortcuts
 useKeyboardShortcuts()
@@ -74,6 +85,7 @@ const isSidebarCollapsed = ref(false)
 // Initialize store on mount
 onMounted(() => {
   store.initialize()
+  workspaceStore.initialize()
 })
 
 // Clean up on unmount to prevent duplicate connections during HMR
@@ -107,6 +119,15 @@ const handleSendMessage = (message: string) => {
 
 const handleSidebarCollapse = (isCollapsed: boolean) => {
   isSidebarCollapsed.value = isCollapsed
+}
+
+const handleSelectProject = (projectId: string) => {
+  console.log('Project selected:', projectId)
+}
+
+const handleOnboardProject = () => {
+  console.log('Onboard project clicked')
+  // TODO: Open onboarding modal
 }
 </script>
 

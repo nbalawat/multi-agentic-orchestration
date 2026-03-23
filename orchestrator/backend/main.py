@@ -171,6 +171,9 @@ async def lifespan(app: FastAPI):
         working_dir=config.get_working_dir(),
     )
 
+    # Set orchestrator ID so completion callbacks can notify it
+    orchestrator_service._orchestrator_agent_id = str(orchestrator.id)
+
     # Store in app state for access in endpoints
     app.state.orchestrator_service = orchestrator_service
     app.state.orchestrator = orchestrator
@@ -200,6 +203,8 @@ async def lifespan(app: FastAPI):
     orchestrator_service.workspace_manager = workspace_manager
     orchestrator_service.plugin_loader = plugin_loader
     orchestrator_service.plugin_registry = plugin_registry
+    # Register context persistence callback (must happen AFTER workspace_manager is wired)
+    workspace_manager.set_persist_context_callback(orchestrator_service._persist_active_context)
     logger.info("Wired workspace_manager + plugin_loader + plugin_registry into OrchestratorService")
 
     # Also wire into agent_manager for phase-aware agent creation
@@ -207,6 +212,43 @@ async def lifespan(app: FastAPI):
     agent_manager.plugin_loader = plugin_loader
     agent_manager.plugin_registry = plugin_registry
     logger.info("Wired workspace_manager + plugin_loader + plugin_registry into AgentManager")
+
+    # ── Restore state from previous session ──
+
+    # 1. Restore active project context
+    # Check current orchestrator first, then fall back to most recent previous one
+    saved_ctx = orchestrator.metadata or {}
+    saved_project_id = saved_ctx.get("active_project_id")
+    if not saved_project_id:
+        # Check any previous orchestrator that had an active project saved
+        try:
+            async with database.get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT metadata FROM orchestrator_agents "
+                    "WHERE metadata->>'active_project_id' IS NOT NULL "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                )
+                if row:
+                    import json
+                    meta = row["metadata"]
+                    if isinstance(meta, str):
+                        meta = json.loads(meta)
+                    saved_project_id = meta.get("active_project_id")
+        except Exception as e:
+            logger.warning(f"Could not query previous orchestrator context: {e}")
+
+    if saved_project_id:
+        try:
+            await workspace_manager.switch_project(saved_project_id)
+            logger.info(f"✅ Restored active project: {saved_project_id}")
+        except Exception as e:
+            logger.warning(f"Could not restore project context: {e}")
+
+    # 2. Recover agents from previous session (across all orchestrators for this workspace)
+    recovered_agents = await agent_manager.load_persisted_agents()
+    if recovered_agents:
+        logger.info(f"✅ Recovered {len(recovered_agents)} agent(s) from previous session")
+        orchestrator_service._recovered_agents = recovered_agents
 
     logger.success("Backend initialization complete")
 

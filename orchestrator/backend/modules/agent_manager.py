@@ -9,7 +9,7 @@ import threading
 import asyncio
 import uuid
 import os
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -127,6 +127,9 @@ class AgentManager:
         # Key: agent_name, Value: {feature_id, project_id, repo_path, worktree_path, worktree_branch}
         self._builder_registry: Dict[str, Dict[str, str]] = {}
 
+        # Callback fired when an agent completes — used to notify the orchestrator
+        self._on_agent_complete_callback: Optional[Callable] = None
+
         # RAPIDS workspace/plugin managers (optional, set after init)
         self.workspace_manager: Optional['WorkspaceManager'] = None
         self.plugin_loader: Optional['PluginLoader'] = None
@@ -142,6 +145,64 @@ class AgentManager:
         self.logger.info(
             f"AgentManager initialized for orchestrator {orchestrator_agent_id}"
         )
+
+    def set_on_agent_complete(self, callback: Callable) -> None:
+        """Register a callback fired when any sub-agent finishes its task."""
+        self._on_agent_complete_callback = callback
+
+    async def load_persisted_agents(self) -> List[Dict]:
+        """Load non-archived, non-completed agents from DB across all orchestrators.
+
+        On restart, a new orchestrator is created, so we need to check agents
+        from previous orchestrators too. Returns summaries so the orchestrator
+        can decide whether to resume them.
+        """
+        from .database import get_connection
+
+        recovered = []
+        try:
+            async with get_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT * FROM agents "
+                    "WHERE archived = false "
+                    "AND status NOT IN ('completed', 'complete') "
+                    "ORDER BY updated_at DESC"
+                )
+                agents_data = [dict(r) for r in rows]
+        except Exception as e:
+            self.logger.error(f"Failed to load persisted agents: {e}")
+            return recovered
+
+        for agent_data in agents_data:
+            agent_id = agent_data.get("id")
+            status = agent_data.get("status", "idle")
+
+            # Mark executing agents as idle (they were mid-task when backend died)
+            if status == "executing":
+                try:
+                    await update_agent_status(agent_id, "idle")
+                except Exception:
+                    pass
+                status = "idle"
+
+            # Parse metadata if needed
+            metadata = agent_data.get("metadata", {})
+            if isinstance(metadata, str):
+                import json
+                metadata = json.loads(metadata)
+
+            recovered.append({
+                "id": str(agent_id),
+                "name": agent_data.get("name", "unknown"),
+                "model": agent_data.get("model", "sonnet"),
+                "system_prompt": agent_data.get("system_prompt"),
+                "working_dir": agent_data.get("working_dir"),
+                "status": status,
+                "session_id": agent_data.get("session_id"),
+                "metadata": metadata,
+            })
+
+        return recovered
 
     def create_management_tools(self) -> List:
         """
@@ -164,13 +225,22 @@ class AgentManager:
             try:
                 name = args.get("name")
                 system_prompt = args.get("system_prompt", "")
-                model_input = args.get("model", config.DEFAULT_AGENT_MODEL)
+                model_input = args.get("model")  # None means "auto-select"
                 subagent_template = args.get("subagent_template")
                 phase = args.get("phase")
                 project_id = args.get("project_id")
 
+                # Auto-select model by phase when no explicit model provided
+                if model_input is None:
+                    model_input = (
+                        config.get_model_for_phase(phase)
+                        if phase
+                        else config.DEFAULT_AGENT_MODEL
+                    )
+
                 # Model alias mapping
                 model_aliases = {
+                    "opus": "claude-opus-4-20250514",
                     "sonnet": "claude-sonnet-4-5-20250929",
                     "haiku": "claude-haiku-4-5-20251001",
                     "fast": "claude-haiku-4-5-20251001",  # Alias for haiku
@@ -1403,7 +1473,7 @@ class AgentManager:
                         result = await self.create_agent(
                             name=entry["agent"],
                             system_prompt=entry["prompt"],
-                            model="sonnet",
+                            model=config.get_model_for_phase("implement"),
                             phase_metadata=phase_meta,
                         )
                         entry["status"] = "created"
@@ -2093,10 +2163,6 @@ class AgentManager:
 
             # Update session and status
             await update_agent_session(agent_id, session_id)
-            await update_agent_status(agent_id, "idle")
-            await self.ws_manager.broadcast_agent_status_change(
-                str(agent_id), "executing", "idle"
-            )
 
             self.logger.info(f"Agent '{agent.name}' completed task: {task_slug}")
 
@@ -2105,6 +2171,20 @@ class AgentManager:
             if builder_info and builder_info.get("worktree_path"):
                 asyncio.create_task(
                     self._auto_merge_and_progress(agent.name, builder_info)
+                )
+
+            # ── Mark agent as completed and notify orchestrator ──
+            await update_agent_status(agent_id, "completed")
+            await self.ws_manager.broadcast_agent_status_change(
+                str(agent_id), "executing", "completed"
+            )
+
+            if self._on_agent_complete_callback:
+                summary = f"Agent '{agent.name}' has completed its task (task: {task_slug})."
+                if builder_info:
+                    summary += f" Feature '{builder_info.get('feature_name', '')}' was implemented."
+                asyncio.create_task(
+                    self._on_agent_complete_callback(agent.name, summary)
                 )
 
             return {"ok": True, "task_slug": task_slug}
@@ -2240,16 +2320,16 @@ class AgentManager:
                         }
                     })
 
-                    # Auto-launch next wave (reuse the orchestrator's execute_ready_features)
-                    # We trigger this by sending a message to the orchestrator
-                    await self.ws_manager.broadcast({
-                        "type": "system_log",
-                        "data": {
-                            "level": "INFO",
-                            "message": f"Wave complete! {len(ready_features)} features ready for next wave. "
-                                       f"DAG: {completed}/{total} complete.",
-                        }
-                    })
+                    # Notify the orchestrator to launch next wave
+                    if self._on_agent_complete_callback:
+                        wave_msg = (
+                            f"Wave complete! {len(ready_features)} features ready for next wave. "
+                            f"DAG: {completed}/{total} complete. "
+                            f"Use execute_ready_features to launch the next wave."
+                        )
+                        asyncio.create_task(
+                            self._on_agent_complete_callback(agent_name, wave_msg)
+                        )
 
                 elif completed == total:
                     self.logger.info(f"[AutoMerge] All features complete! DAG 100%")

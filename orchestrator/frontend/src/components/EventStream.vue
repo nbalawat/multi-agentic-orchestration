@@ -26,26 +26,71 @@
       <div v-if="displayEvents.length === 0" class="empty-state">
         <div class="empty-icon">
           <svg
-            width="98"
-            height="98"
-            viewBox="0 0 98 98"
+            width="120"
+            height="120"
+            viewBox="0 0 120 120"
             xmlns="http://www.w3.org/2000/svg"
           >
-            <!-- 3x3 grid of rounded rectangles -->
-            <!-- Row 1 -->
-            <rect x="0" y="0" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="34" y="0" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="68" y="0" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
+            <defs>
+              <linearGradient id="rapids-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#86BC24" stop-opacity="0.8" />
+                <stop offset="100%" stop-color="#22c55e" stop-opacity="0.4" />
+              </linearGradient>
+              <filter id="glow">
+                <feGaussianBlur stdDeviation="2" result="blur" />
+                <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+              </filter>
+            </defs>
 
-            <!-- Row 2 -->
-            <rect x="0" y="34" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="34" y="34" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="68" y="34" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
+            <!-- Connection lines (agent network) -->
+            <line x1="60" y1="30" x2="30" y2="60" stroke="#86BC24" stroke-width="1.5" opacity="0.3">
+              <animate attributeName="opacity" values="0.15;0.5;0.15" dur="3s" repeatCount="indefinite" />
+            </line>
+            <line x1="60" y1="30" x2="90" y2="60" stroke="#86BC24" stroke-width="1.5" opacity="0.3">
+              <animate attributeName="opacity" values="0.15;0.5;0.15" dur="3s" begin="0.5s" repeatCount="indefinite" />
+            </line>
+            <line x1="30" y1="60" x2="45" y2="95" stroke="#86BC24" stroke-width="1.5" opacity="0.3">
+              <animate attributeName="opacity" values="0.15;0.5;0.15" dur="3s" begin="1s" repeatCount="indefinite" />
+            </line>
+            <line x1="90" y1="60" x2="75" y2="95" stroke="#86BC24" stroke-width="1.5" opacity="0.3">
+              <animate attributeName="opacity" values="0.15;0.5;0.15" dur="3s" begin="1.5s" repeatCount="indefinite" />
+            </line>
+            <line x1="30" y1="60" x2="90" y2="60" stroke="#86BC24" stroke-width="1" opacity="0.2">
+              <animate attributeName="opacity" values="0.1;0.35;0.1" dur="4s" repeatCount="indefinite" />
+            </line>
+            <line x1="45" y1="95" x2="75" y2="95" stroke="#86BC24" stroke-width="1" opacity="0.2">
+              <animate attributeName="opacity" values="0.1;0.35;0.1" dur="4s" begin="1s" repeatCount="indefinite" />
+            </line>
 
-            <!-- Row 3 -->
-            <rect x="0" y="68" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="34" y="68" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
-            <rect x="68" y="68" width="30" height="30" rx="2" fill="#000" stroke="#404040" stroke-width="1"/>
+            <!-- Central orchestrator node -->
+            <circle cx="60" cy="30" r="12" fill="none" stroke="url(#rapids-grad)" stroke-width="2" filter="url(#glow)">
+              <animate attributeName="r" values="11;13;11" dur="2s" repeatCount="indefinite" />
+            </circle>
+            <circle cx="60" cy="30" r="5" fill="#86BC24" opacity="0.9">
+              <animate attributeName="opacity" values="0.6;1;0.6" dur="2s" repeatCount="indefinite" />
+            </circle>
+
+            <!-- Agent nodes -->
+            <circle cx="30" cy="60" r="9" fill="none" stroke="#58a6ff" stroke-width="1.5" opacity="0.6" />
+            <circle cx="30" cy="60" r="3.5" fill="#58a6ff" opacity="0.5" />
+
+            <circle cx="90" cy="60" r="9" fill="none" stroke="#58a6ff" stroke-width="1.5" opacity="0.6" />
+            <circle cx="90" cy="60" r="3.5" fill="#58a6ff" opacity="0.5" />
+
+            <circle cx="45" cy="95" r="7" fill="none" stroke="#bc8cff" stroke-width="1.5" opacity="0.5" />
+            <circle cx="45" cy="95" r="3" fill="#bc8cff" opacity="0.4" />
+
+            <circle cx="75" cy="95" r="7" fill="none" stroke="#bc8cff" stroke-width="1.5" opacity="0.5" />
+            <circle cx="75" cy="95" r="3" fill="#bc8cff" opacity="0.4" />
+
+            <!-- Pulse ring on orchestrator -->
+            <circle cx="60" cy="30" r="16" fill="none" stroke="#86BC24" stroke-width="1" opacity="0">
+              <animate attributeName="r" values="14;22" dur="2s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.4;0" dur="2s" repeatCount="indefinite" />
+            </circle>
+
+            <!-- RAPIDS text -->
+            <text x="60" y="118" text-anchor="middle" fill="#8b949e" font-size="9" font-family="'SF Mono', monospace" letter-spacing="3">RAPIDS</text>
           </svg>
         </div>
         <p class="empty-title">

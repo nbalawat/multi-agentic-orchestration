@@ -91,15 +91,37 @@ DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
 
 FAST_MODEL = "claude-haiku-4-5-20251001"
 
+# Opus model for heavy-lifting (orchestration, research, planning)
+OPUS_MODEL = "claude-opus-4-20250514"
+
 # Available models
-AVAILABLE_MODELS = ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
+AVAILABLE_MODELS = [
+    "claude-opus-4-20250514",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+]
 
 # ============================================================================
 # ORCHESTRATOR CONFIGURATION
 # ============================================================================
 
-# Orchestrator agent model
-ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", DEFAULT_MODEL)
+# Orchestrator agent model — defaults to Opus for deep reasoning
+ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", OPUS_MODEL)
+
+# Phase-to-model mapping: strategic phases use Opus, execution phases use Sonnet
+PHASE_MODEL_MAP = {
+    "research": os.getenv("RESEARCH_MODEL", OPUS_MODEL),
+    "analysis": os.getenv("ANALYSIS_MODEL", OPUS_MODEL),
+    "plan": os.getenv("PLAN_MODEL", OPUS_MODEL),
+    "implement": os.getenv("IMPLEMENT_MODEL", DEFAULT_MODEL),
+    "deploy": os.getenv("DEPLOY_MODEL", DEFAULT_MODEL),
+    "sustain": os.getenv("SUSTAIN_MODEL", DEFAULT_MODEL),
+}
+
+
+def get_model_for_phase(phase: str) -> str:
+    """Return the configured model for a given RAPIDS phase."""
+    return PHASE_MODEL_MAP.get(phase, DEFAULT_MODEL)
 
 # Orchestrator system prompt path
 ORCHESTRATOR_SYSTEM_PROMPT_PATH = os.getenv(
@@ -153,6 +175,16 @@ AGENT_SYSTEM_PROMPT_TEMPLATE_PATH = os.getenv(
 
 # Maximum turns for agent execution
 MAX_AGENT_TURNS = int(os.getenv("MAX_AGENT_TURNS", "500"))
+
+# ============================================================================
+# GIT REMOTE SYNC CONFIGURATION
+# ============================================================================
+
+# Enable remote sync (fetch before worktree, push after merge)
+GIT_REMOTE_SYNC = os.getenv("GIT_REMOTE_SYNC", "true").lower() in ["true", "1", "yes"]
+
+# Remote name (usually "origin")
+GIT_REMOTE_NAME = os.getenv("GIT_REMOTE_NAME", "origin")
 
 # ============================================================================
 # LOG QUERY LIMITS

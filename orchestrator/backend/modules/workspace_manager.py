@@ -5,8 +5,9 @@ Business logic for workspace/project lifecycle, context switching,
 and project onboarding.
 """
 
+import asyncio
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -32,6 +33,13 @@ class WorkspaceManager:
         self._active_workspace_id: Optional[str] = None
         self._active_project_id: Optional[str] = None
         self._project_contexts: Dict[str, Dict] = {}  # project_id -> {repo_path, archetype, etc.}
+
+        # Callback to persist active context to DB for boot recovery
+        self._persist_context_callback: Optional[Callable] = None
+
+    def set_persist_context_callback(self, callback: Callable) -> None:
+        """Register callback to persist active workspace/project to DB."""
+        self._persist_context_callback = callback
 
     # =========================================================================
     # Workspace operations
@@ -194,6 +202,16 @@ class WorkspaceManager:
         self._active_workspace_id = workspace_id
         self._active_project_id = project_id
 
+        # Propagate context to global config so agents and UI see the active project
+        config.set_active_project(
+            project_id, str(repo.resolve()), name=name, archetype=archetype
+        )
+        config.set_active_workspace(workspace_id)
+
+        # Persist to DB for boot recovery
+        if self._persist_context_callback:
+            asyncio.create_task(self._persist_context_callback(workspace_id, project_id))
+
         project["plugin_info"] = plugin_info
         return project
 
@@ -306,6 +324,16 @@ class WorkspaceManager:
         # 2. Update config with project's repo_path as working dir
         if repo_path:
             config.set_working_dir(repo_path)
+
+        # Propagate context to global config so agents and UI see the active project
+        config.set_active_project(
+            project_id, repo_path, name=project.get("name", ""), archetype=archetype
+        )
+        config.set_active_workspace(workspace_id)
+
+        # Persist to DB for boot recovery
+        if self._persist_context_callback:
+            asyncio.create_task(self._persist_context_callback(workspace_id, project_id))
 
         # 3. Load project's plugin
         plugin_info = None

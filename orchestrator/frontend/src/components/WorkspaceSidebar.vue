@@ -1,33 +1,41 @@
 <template>
-  <div class="workspace-sidebar">
-    <!-- Workspace Selector -->
-    <div class="sidebar-section workspace-selector">
-      <label class="section-label">WORKSPACE</label>
-      <select
-        class="workspace-dropdown"
-        :value="workspaceStore.activeWorkspaceId"
-        @change="onWorkspaceChange"
-        :disabled="workspaceStore.isLoading"
-      >
-        <option value="" disabled>Select workspace...</option>
-        <option
-          v-for="ws in workspaceStore.workspaces"
-          :key="ws.id"
-          :value="ws.id"
+  <div class="workspace-sidebar" :class="{ collapsed: collapsed }">
+    <!-- Workspace Selector (hidden when sidebar collapsed) -->
+    <div v-show="!collapsed" class="sidebar-section workspace-selector">
+      <div class="section-header clickable" @click="toggleWorkspace">
+        <span class="section-label">WORKSPACE</span>
+        <span class="collapse-chevron">{{ isWorkspaceExpanded ? '▾' : '▸' }}</span>
+      </div>
+      <div v-show="isWorkspaceExpanded">
+        <select
+          class="workspace-dropdown"
+          :value="workspaceStore.activeWorkspaceId"
+          @change="onWorkspaceChange"
+          :disabled="workspaceStore.isLoading"
         >
-          {{ ws.name }}
-        </option>
-      </select>
+          <option value="" disabled>Select workspace...</option>
+          <option
+            v-for="ws in workspaceStore.workspaces"
+            :key="ws.id"
+            :value="ws.id"
+          >
+            {{ ws.name }}
+          </option>
+        </select>
+      </div>
     </div>
 
-    <!-- Projects Section -->
-    <div class="sidebar-section projects-section">
-      <div class="section-header">
+    <!-- Projects Section (hidden when sidebar collapsed) -->
+    <div v-show="!collapsed" class="sidebar-section projects-section">
+      <div class="section-header clickable" @click="toggleProjects">
         <span class="section-label">PROJECTS</span>
-        <span class="section-count">{{ workspaceStore.projectCount }}</span>
+        <div class="section-header-right">
+          <span class="section-count">{{ workspaceStore.projectCount }}</span>
+          <span class="collapse-chevron">{{ isProjectsExpanded ? '▾' : '▸' }}</span>
+        </div>
       </div>
 
-      <div class="project-list">
+      <div v-show="isProjectsExpanded" class="project-list">
         <div
           v-for="project in workspaceStore.projects"
           :key="project.id"
@@ -56,18 +64,18 @@
         </div>
       </div>
 
-      <button class="btn-onboard" @click="$emit('onboard-project')">
+      <button v-show="isProjectsExpanded" class="btn-onboard" @click="$emit('onboard-project')">
         + Onboard Project
       </button>
     </div>
 
-    <!-- Agents Section (collapsible, wraps AgentList) -->
+    <!-- Agents Section: header hidden when collapsed, AgentList always rendered -->
     <div class="sidebar-section agents-section">
-      <div class="section-header clickable" @click="toggleAgents">
+      <div v-show="!collapsed" class="section-header clickable" @click="toggleAgents">
         <span class="section-label">AGENTS</span>
         <span class="collapse-chevron">{{ isAgentsExpanded ? '▾' : '▸' }}</span>
       </div>
-      <div v-show="isAgentsExpanded" class="agents-wrapper">
+      <div v-show="!collapsed ? isAgentsExpanded : true" class="agents-wrapper">
         <slot name="agent-list">
           <!-- Parent should pass AgentList here -->
         </slot>
@@ -80,6 +88,10 @@
 import { ref } from 'vue'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 
+const props = defineProps<{
+  collapsed?: boolean
+}>()
+
 const workspaceStore = useWorkspaceStore()
 
 const emit = defineEmits<{
@@ -87,7 +99,17 @@ const emit = defineEmits<{
   'select-project': [projectId: string]
 }>()
 
+const isWorkspaceExpanded = ref(true)
+const isProjectsExpanded = ref(true)
 const isAgentsExpanded = ref(true)
+
+function toggleWorkspace() {
+  isWorkspaceExpanded.value = !isWorkspaceExpanded.value
+}
+
+function toggleProjects() {
+  isProjectsExpanded.value = !isProjectsExpanded.value
+}
 
 function toggleAgents() {
   isAgentsExpanded.value = !isAgentsExpanded.value
@@ -132,16 +154,21 @@ function formatPhase(phase: string): string {
   height: 100%;
   background: #0d1117;
   border-right: 1px solid #21262d;
-  overflow-y: auto;
+  overflow: hidden;
   color: #c9d1d9;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 12px;
+}
+
+.workspace-sidebar.collapsed {
+  overflow-y: hidden;
 }
 
 /* Sections */
 .sidebar-section {
   padding: 12px;
   border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
 }
 
 .section-label {
@@ -179,6 +206,12 @@ function formatPhase(phase: string): string {
 .collapse-chevron {
   font-size: 11px;
   color: #8b949e;
+}
+
+.section-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Workspace Dropdown */
@@ -333,9 +366,12 @@ function formatPhase(phase: string): string {
   border-color: #58a6ff;
 }
 
-/* Agents Wrapper */
+/* Agents Wrapper — must pass height to AgentList's height:100% */
 .agents-wrapper {
   margin-top: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .agents-section {
@@ -343,5 +379,6 @@ function formatPhase(phase: string): string {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 </style>

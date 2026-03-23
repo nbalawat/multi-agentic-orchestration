@@ -24,13 +24,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useOrchestratorStore } from '../stores/orchestratorStore'
+import { computed, onMounted } from 'vue'
+import { useWorkspaceStore } from '../stores/workspaceStore'
 
-const store = useOrchestratorStore()
+const workspaceStore = useWorkspaceStore()
 
-const activeProject = ref<any>(null)
-const activeWorkspace = ref<any>(null)
+const activeProject = computed(() => workspaceStore.activeProject)
+const activeWorkspace = computed(() => workspaceStore.activeWorkspace)
 
 const phaseClass = computed(() => {
   const phase = activeProject.value?.current_phase?.toLowerCase()
@@ -42,26 +42,25 @@ const phaseClass = computed(() => {
   return ''
 })
 
-async function fetchContext() {
+async function fetchContextFallback() {
   try {
     const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:9403'
     const resp = await fetch(`${apiBase}/get_headers`)
     const data = await resp.json()
-    activeProject.value = data.active_project
-    activeWorkspace.value = data.active_workspace
+    if (data.active_project && !activeProject.value) {
+      // Fallback: if workspace store hasn't loaded yet, seed from backend
+      if (data.active_workspace?.id) {
+        workspaceStore.setActiveWorkspace(data.active_workspace.id)
+      }
+    }
   } catch (e) {
-    console.error('Failed to fetch project context:', e)
+    console.error('Failed to fetch project context fallback:', e)
   }
 }
 
-// Poll every 10s and on mount
 onMounted(() => {
-  fetchContext()
-  setInterval(fetchContext, 10000)
+  fetchContextFallback()
 })
-
-// Also refresh when store events suggest a project switch
-// (WebSocket orchestrator_updated events)
 </script>
 
 <style scoped>

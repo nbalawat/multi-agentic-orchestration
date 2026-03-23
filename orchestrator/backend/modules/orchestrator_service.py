@@ -151,13 +151,21 @@ class OrchestratorService:
         # Circuit breaker for Claude API calls
         self._circuit_breaker = get_claude_api_breaker()
 
+        # Orchestrator agent ID — set on first message or from main.py
+        self._orchestrator_agent_id: Optional[str] = None
+
         # Get management tools from agent_manager if provided
         self.management_tools = []
         if self.agent_manager:
             self.management_tools = self.agent_manager.create_management_tools()
+            # Register completion callback so orchestrator is notified when agents finish
+            self.agent_manager.set_on_agent_complete(self._handle_agent_completion)
             self.logger.info(
                 f"Registered {len(self.management_tools)} management tools"
             )
+
+        # Recovered agents from previous session (set by main.py after boot)
+        self._recovered_agents: List[Dict] = []
 
         self.logger.info(f"OrchestratorService initialized")
         if session_id:
@@ -400,6 +408,23 @@ class OrchestratorService:
                 blocks["PLUGIN_AGENTS"] = "Plugin agents unavailable."
         else:
             blocks["PLUGIN_AGENTS"] = "No active project — plugin agents unavailable."
+
+        # --- RECOVERED_AGENTS (from previous session) ---
+        if self._recovered_agents:
+            lines = []
+            for a in self._recovered_agents:
+                prompt_summary = (a.get("system_prompt") or "")[:150].replace("\n", " ")
+                lines.append(
+                    f"- **{a['name']}** (status: {a['status']}, model: {a.get('model', 'unknown')}): "
+                    f"{prompt_summary}..."
+                )
+            blocks["RECOVERED_AGENTS"] = (
+                "The following agents existed in the previous session and were interrupted by a restart:\n\n"
+                + "\n".join(lines) + "\n\n"
+                "You can re-create these agents with `create_agent` using their original system prompts, "
+                "or `delete_agent` if they are no longer needed. "
+                "Focus on resuming work for the active project."
+            )
 
         return blocks
 
@@ -737,6 +762,10 @@ class OrchestratorService:
             Exception: If execution fails
         """
         orch_uuid = uuid.UUID(orchestrator_agent_id)
+
+        # Capture orchestrator ID for agent completion callbacks
+        if self._orchestrator_agent_id is None:
+            self._orchestrator_agent_id = orchestrator_agent_id
 
         # ═══════════════════════════════════════════════════════════
         # PHASE 1: PRE-EXECUTION - Log user message
@@ -1260,6 +1289,45 @@ class OrchestratorService:
     # ═══════════════════════════════════════════════════════════
     # HELPER METHODS - AI Summarization
     # ═══════════════════════════════════════════════════════════
+
+    async def _persist_active_context(self, workspace_id: str, project_id: str) -> None:
+        """Save active workspace/project to orchestrator metadata for boot recovery."""
+        if not self._orchestrator_agent_id:
+            return
+        try:
+            from .database import update_orchestrator_metadata
+            await update_orchestrator_metadata(
+                uuid.UUID(str(self._orchestrator_agent_id)),
+                {"active_workspace_id": str(workspace_id), "active_project_id": str(project_id)},
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to persist active context: {e}")
+
+    async def _handle_agent_completion(self, agent_name: str, summary: str) -> None:
+        """
+        Callback fired when a sub-agent completes its task.
+        Sends a notification into the orchestrator conversation so the
+        orchestrator can review results and decide next steps autonomously.
+        """
+        if not self._orchestrator_agent_id:
+            self.logger.warning(
+                f"Agent '{agent_name}' completed but no orchestrator ID set — cannot notify"
+            )
+            return
+
+        notification = (
+            f"[AGENT COMPLETED] {summary} "
+            f"Review the results and decide next steps."
+        )
+
+        try:
+            self.logger.info(f"Notifying orchestrator of agent completion: {agent_name}")
+            await self.process_user_message(
+                notification,
+                self._orchestrator_agent_id,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to notify orchestrator of agent completion: {e}")
 
     async def _summarize_and_update_chat(
         self, chat_id: uuid.UUID, message: str
