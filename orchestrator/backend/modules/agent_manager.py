@@ -2581,33 +2581,16 @@ class AgentManager:
                     self._auto_merge_and_progress(agent.name, builder_info)
                 )
 
-            # ── Mark agent as completed, notify orchestrator, and clean up ──
-            await update_agent_status(agent_id, "completed")
-            await self.ws_manager.broadcast_agent_status_change(
-                str(agent_id), "executing", "completed"
-            )
+            # Agent cleanup (mark completed + archive) is handled by the Stop hook's
+            # cleanup callback (_create_cleanup_hook). This runs when the Claude SDK
+            # session actually ends, which is the definitive signal.
 
             # Notify orchestrator ONLY for non-builder agents.
-            # Builder agents are handled by _auto_merge_and_progress which
-            # notifies on wave transitions and DAG completion — notifying here
-            # too causes a re-execution loop.
             if self._on_agent_complete_callback and not builder_info:
                 summary = f"Agent '{agent.name}' has completed its task (task: {task_slug})."
                 asyncio.create_task(
                     self._on_agent_complete_callback(agent.name, summary)
                 )
-
-            # Auto-delete builder agents after completion — they're single-use
-            if builder_info:
-                try:
-                    await delete_agent(agent_id)
-                    self.logger.info(f"Auto-deleted builder agent '{agent.name}' after feature completion")
-                    await self.ws_manager.broadcast({
-                        "type": "agent_deleted",
-                        "data": {"agent_id": str(agent_id), "agent_name": agent.name}
-                    })
-                except Exception as del_err:
-                    self.logger.warning(f"Failed to auto-delete agent '{agent.name}': {del_err}")
 
             return {"ok": True, "task_slug": task_slug}
 
@@ -2833,6 +2816,39 @@ class AgentManager:
             except Exception as e:
                 self.logger.error(f"[AutoMerge] Failed to check next wave: {e}")
 
+    def _create_cleanup_hook(self, agent_id: uuid.UUID, agent_name: str):
+        """Create a Stop hook that auto-archives the agent after completion.
+
+        This runs after the standard stop hook (logging). It:
+        1. Marks the agent as completed in the DB
+        2. Archives (soft-deletes) the agent
+        3. Broadcasts the deletion to the frontend
+        """
+        async def cleanup_hook(
+            input_data: Dict[str, Any],
+            tool_use_id: Optional[str],
+            context: Any,
+        ) -> Dict[str, Any]:
+            try:
+                # Mark completed and archive
+                await update_agent_status(agent_id, "completed")
+                await delete_agent(agent_id)
+                self.logger.info(f"[Cleanup] Agent '{agent_name}' archived after stop")
+
+                # Broadcast to frontend
+                await self.ws_manager.broadcast_agent_status_change(
+                    str(agent_id), "executing", "completed"
+                )
+                await self.ws_manager.broadcast({
+                    "type": "agent_deleted",
+                    "data": {"agent_id": str(agent_id), "agent_name": agent_name},
+                })
+            except Exception as e:
+                self.logger.warning(f"[Cleanup] Failed to clean up agent '{agent_name}': {e}")
+            return {}
+
+        return cleanup_hook
+
     def _build_hooks_for_agent(
         self,
         agent_id: uuid.UUID,
@@ -2918,7 +2934,8 @@ class AgentManager:
                             entry_counter,
                             self.logger,
                             self.ws_manager,
-                        )
+                        ),
+                        self._create_cleanup_hook(agent_id, agent_name),
                     ]
                 )
             ],
