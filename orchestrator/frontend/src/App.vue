@@ -116,26 +116,25 @@ const isSidebarCollapsed = ref(false)
 const centerView = ref<'events' | 'flow'>('events')
 const flowKey = ref(0)
 const selectedFlowFeature = ref<any>(null)
+// Show flow tab if project is in implement phase OR user is already viewing flow
 const showFlowTab = computed(() => {
+  if (centerView.value === 'flow') return true  // never hide while viewing
   const phase = workspaceStore.activeProject?.current_phase
   return phase === 'implement'
 })
 
-// Auto-switch to flow view when entering implement phase
 const flowStore = useImplementFlowStore()
 
-// Auto-switch to flow when entering implement phase, but don't force back
-watch(showFlowTab, (show) => {
-  if (show && centerView.value === 'events') {
+// Auto-switch to flow when entering implement phase (one-time)
+watch(() => workspaceStore.activeProject?.current_phase, (phase) => {
+  if (phase === 'implement' && centerView.value === 'events') {
     centerView.value = 'flow'
   }
 })
 
-// Force fresh mount when switching to flow tab
-watch(centerView, (view) => {
-  if (view === 'flow') {
-    flowKey.value++  // triggers v-if re-mount with fresh data
-  }
+// Only increment flowKey on project change (not on tab switch)
+watch(() => workspaceStore.activeProjectId, () => {
+  flowKey.value++
 })
 
 // Initialize store on mount
