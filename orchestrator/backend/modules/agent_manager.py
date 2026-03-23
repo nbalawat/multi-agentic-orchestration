@@ -2573,10 +2573,12 @@ class AgentManager:
                 str(agent_id), "executing", "completed"
             )
 
-            if self._on_agent_complete_callback:
+            # Notify orchestrator ONLY for non-builder agents.
+            # Builder agents are handled by _auto_merge_and_progress which
+            # notifies on wave transitions and DAG completion — notifying here
+            # too causes a re-execution loop.
+            if self._on_agent_complete_callback and not builder_info:
                 summary = f"Agent '{agent.name}' has completed its task (task: {task_slug})."
-                if builder_info:
-                    summary += f" Feature '{builder_info.get('feature_name', '')}' was implemented."
                 asyncio.create_task(
                     self._on_agent_complete_callback(agent.name, summary)
                 )
