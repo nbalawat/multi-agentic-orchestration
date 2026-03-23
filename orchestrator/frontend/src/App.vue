@@ -27,8 +27,8 @@
       </WorkspaceSidebar>
 
       <div class="app-content center">
-        <!-- Tab bar for center column (flow tab only during implement phase) -->
-        <div v-if="showFlowTab" class="center-tabs">
+        <!-- Tab bar — always present when flow is available -->
+        <div class="center-tabs" :class="{ hidden: !showFlowTab }">
           <button
             class="center-tab"
             :class="{ active: centerView === 'events' }"
@@ -41,19 +41,21 @@
           >Implementation Flow</button>
         </div>
 
-        <EventStream
-          v-show="centerView === 'events'"
-          ref="eventStreamRef"
-          :events="store.filteredEventStream"
-          :current-filter="store.eventStreamFilter"
-          :auto-scroll="true"
-          @set-filter="handleSetFilter"
-        />
-        <ImplementationFlow
-          v-if="centerView === 'flow'"
-          :key="flowKey"
-          @select-feature="handleFeatureSelect"
-        />
+        <!-- Both panels always mounted — pure CSS visibility -->
+        <div class="center-panel" :class="{ 'panel-visible': centerView === 'events' }">
+          <EventStream
+            ref="eventStreamRef"
+            :events="store.filteredEventStream"
+            :current-filter="store.eventStreamFilter"
+            :auto-scroll="true"
+            @set-filter="handleSetFilter"
+          />
+        </div>
+        <div class="center-panel" :class="{ 'panel-visible': centerView === 'flow' }">
+          <ImplementationFlow
+            @select-feature="handleFeatureSelect"
+          />
+        </div>
         <FlowFeatureModal
           v-if="selectedFlowFeature"
           :feature="selectedFlowFeature"
@@ -114,7 +116,6 @@ const isSidebarCollapsed = ref(false)
 
 // Center column tab: 'events' or 'flow'
 const centerView = ref<'events' | 'flow'>('events')
-const flowKey = ref(0)
 const selectedFlowFeature = ref<any>(null)
 // Show flow tab if project is in implement phase OR user is already viewing flow
 const showFlowTab = computed(() => {
@@ -132,10 +133,6 @@ watch(() => workspaceStore.activeProject?.current_phase, (phase) => {
   }
 })
 
-// Only increment flowKey on project change (not on tab switch)
-watch(() => workspaceStore.activeProjectId, () => {
-  flowKey.value++
-})
 
 // Initialize store on mount
 onMounted(() => {
@@ -273,6 +270,23 @@ const handleFeatureSelect = (featureId: string) => {
 .center-tab.active {
   color: #86BC24;
   border-bottom-color: #86BC24;
+}
+
+.center-tabs.hidden {
+  display: none;
+}
+
+/* Panel stacking — only the visible one takes space */
+.center-panel {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.center-panel.panel-visible {
+  display: flex;
+  flex-direction: column;
 }
 
 .app-sidebar.right {
