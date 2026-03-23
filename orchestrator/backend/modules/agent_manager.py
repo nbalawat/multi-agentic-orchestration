@@ -1401,20 +1401,8 @@ class AgentManager:
                         f"5. When done, summarize what you implemented\n"
                     )
 
-                    # Mark feature as in_progress in DAG immediately
-                    try:
-                        async with httpx.AsyncClient() as client:
-                            await client.post(
-                                f"{_API_BASE}/api/projects/{project_id}/dag/features/{feature_id}/status",
-                                json={"status": "in_progress", "agent_name": agent_name},
-                                timeout=10.0,
-                            )
-                        await self.ws_manager.broadcast({
-                            "type": "feature_started",
-                            "data": {"project_id": project_id, "feature_id": feature_id, "feature_name": feature_name, "agent_name": agent_name}
-                        })
-                    except Exception as e:
-                        self.logger.error(f"Failed to mark feature {feature_id} in_progress: {e}")
+                    # NOTE: status is marked in_progress AFTER agent creation succeeds
+                    # (inside _launch_builder) to avoid stuck features on failure
 
                     agents_created.append({
                         "agent": agent_name,
@@ -1478,6 +1466,26 @@ class AgentManager:
                         )
                         entry["status"] = "created"
 
+                        # Mark feature in_progress ONLY after agent creation succeeds
+                        try:
+                            async with httpx.AsyncClient() as status_client:
+                                await status_client.post(
+                                    f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
+                                    json={"status": "in_progress", "agent_name": entry["agent"]},
+                                    timeout=10.0,
+                                )
+                            await self.ws_manager.broadcast({
+                                "type": "feature_started",
+                                "data": {
+                                    "project_id": project_id,
+                                    "feature_id": entry["feature_id"],
+                                    "feature_name": entry["feature"],
+                                    "agent_name": entry["agent"],
+                                }
+                            })
+                        except Exception as status_err:
+                            self.logger.error(f"Failed to mark feature in_progress: {status_err}")
+
                         # Dispatch the implementation task in background
                         # command_agent takes agent_id (UUID), not agent_name
                         # Use the command_agent_by_name helper which resolves name → id
@@ -1502,6 +1510,20 @@ class AgentManager:
 
                     except Exception as e:
                         entry["status"] = f"error: {str(e)}"
+                        self.logger.error(f"Builder launch failed for '{entry['feature']}': {e}")
+
+                        # Roll back: reset feature status to planned so it can be retried
+                        try:
+                            async with httpx.AsyncClient() as rollback_client:
+                                await rollback_client.post(
+                                    f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
+                                    json={"status": "planned"},
+                                    timeout=10.0,
+                                )
+                            self.logger.info(f"Rolled back feature '{entry['feature']}' to planned after launch failure")
+                        except Exception as rb_err:
+                            self.logger.error(f"Failed to roll back feature status: {rb_err}")
+
                         await self.ws_manager.broadcast({
                             "type": "feature_failed",
                             "data": {"project_id": project_id, "feature_id": entry["feature_id"], "error": str(e)}
@@ -2523,7 +2545,7 @@ class AgentManager:
                     self._auto_merge_and_progress(agent.name, builder_info)
                 )
 
-            # ── Mark agent as completed and notify orchestrator ──
+            # ── Mark agent as completed, notify orchestrator, and clean up ──
             await update_agent_status(agent_id, "completed")
             await self.ws_manager.broadcast_agent_status_change(
                 str(agent_id), "executing", "completed"
@@ -2536,6 +2558,18 @@ class AgentManager:
                 asyncio.create_task(
                     self._on_agent_complete_callback(agent.name, summary)
                 )
+
+            # Auto-delete builder agents after completion — they're single-use
+            if builder_info:
+                try:
+                    await delete_agent(agent_id)
+                    self.logger.info(f"Auto-deleted builder agent '{agent.name}' after feature completion")
+                    await self.ws_manager.broadcast({
+                        "type": "agent_deleted",
+                        "data": {"agent_id": str(agent_id), "agent_name": agent.name}
+                    })
+                except Exception as del_err:
+                    self.logger.warning(f"Failed to auto-delete agent '{agent.name}': {del_err}")
 
             return {"ok": True, "task_slug": task_slug}
 

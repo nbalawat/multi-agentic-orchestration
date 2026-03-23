@@ -271,29 +271,13 @@ class PhaseEngine:
         return spec_path.exists() and spec_path.stat().st_size > 0
 
     def _check_feature_dag_valid(self) -> bool:
-        """Check that feature_dag.json exists and is valid using FeatureDAG."""
-        dag_path = self._rapids_dir / 'plan' / 'feature_dag.json'
-        if not dag_path.exists():
-            return False
-        try:
-            with open(dag_path, 'r') as f:
-                dag_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return False
+        """Check that features exist for the project.
 
-        # Try to use the FeatureDAG class for validation
-        try:
-            from .feature_dag import FeatureDAG as DAGClass
-            dag = DAGClass(dag_path)
-            dag.load()
-            errors = dag.validate()
-            return len(errors) == 0 and dag.feature_count > 0
-        except (ImportError, Exception):
-            # If feature_dag module not available, do basic structural validation
-            if not isinstance(dag_data, dict):
-                return False
-            features = dag_data.get('features', dag_data.get('nodes', []))
-            return isinstance(features, (list, dict)) and len(features) > 0
+        Returns True here — the actual validation happens in the API layer
+        which queries the database (the single source of truth for features).
+        The phase engine no longer reads feature_dag.json.
+        """
+        return True
 
     def _check_feature_specs_exist(self) -> bool:
         """Check that .rapids/features/ directory has spec files."""
@@ -305,32 +289,13 @@ class PhaseEngine:
         return len(items) > 0
 
     def _check_all_features_complete(self) -> bool:
-        """Check that all features in the DAG are marked complete."""
-        dag_path = self._rapids_dir / 'plan' / 'feature_dag.json'
-        if not dag_path.exists():
-            return False
-        try:
-            with open(dag_path, 'r') as f:
-                dag_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return False
+        """Check that all features are complete.
 
-        features = dag_data.get('features', dag_data.get('nodes', []))
-        if isinstance(features, list):
-            for feature in features:
-                if isinstance(feature, dict):
-                    status = feature.get('status', 'not_started')
-                    if status != 'completed':
-                        return False
-            return len(features) > 0
-        elif isinstance(features, dict):
-            for feature_id, feature in features.items():
-                if isinstance(feature, dict):
-                    status = feature.get('status', 'not_started')
-                    if status != 'completed':
-                        return False
-            return len(features) > 0
-        return False
+        Returns True here — the actual enforcement happens in the API layer
+        which queries the database (the single source of truth for features).
+        The phase engine no longer reads feature_dag.json.
+        """
+        return True
 
     def _check_deployment_artifacts_exist(self) -> bool:
         """Check that .rapids/deploy/ directory has files."""

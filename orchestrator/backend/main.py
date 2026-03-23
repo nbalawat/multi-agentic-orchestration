@@ -1331,6 +1331,20 @@ async def complete_phase(
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
 
+        # Guard: for implement phase, verify ALL features are complete in DB
+        if phase == "implement" and not force:
+            from modules.rapids_database import load_dag_features
+            db_features = await load_dag_features(uuid.UUID(project_id))
+            if db_features:
+                incomplete = [f for f in db_features if f.status not in ("complete", "completed")]
+                if incomplete:
+                    names = [f.name for f in incomplete[:5]]
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot complete implement phase: {len(incomplete)} features not complete: {', '.join(names)}"
+                        + (f" and {len(incomplete) - 5} more" if len(incomplete) > 5 else ""),
+                    )
+
         # Use PhaseEngine to manage the transition
         repo_path = project.repo_path
         if repo_path:
@@ -1391,6 +1405,20 @@ async def advance_phase(
                 status_code=400,
                 detail=f"Cannot advance: '{current_phase}' is the last RAPIDS phase",
             )
+
+        # Guard: for implement phase, verify ALL features are complete in DB
+        if current_phase == "implement" and not force:
+            from modules.rapids_database import load_dag_features
+            db_features = await load_dag_features(uuid.UUID(project_id))
+            if db_features:
+                incomplete = [f for f in db_features if f.status not in ("complete", "completed")]
+                if incomplete:
+                    names = [f.name for f in incomplete[:5]]
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot advance from implement: {len(incomplete)} features not complete: {', '.join(names)}"
+                        + (f" and {len(incomplete) - 5} more" if len(incomplete) > 5 else ""),
+                    )
 
         phase_info = engine.advance_phase(force=force)
 

@@ -93,10 +93,10 @@ Always clean up agents when their tasks are complete.
 ### Convergence Gate
 The Plan phase must produce:
 - `spec.md` — Consolidated project specification
-- `feature_dag.json` — Feature dependency graph with acceptance criteria
+- Features in the database with dependencies and acceptance criteria (use `create_features_batch` or `create_feature`)
 - Per-feature spec files in `.rapids/features/`
 
-Only when these exist and validate can the project advance to Implement.
+Only when features exist in the database and validate can the project advance to Implement.
 
 ## Workspace Context
 
@@ -139,8 +139,17 @@ Use these templates with the `subagent_template` parameter when creating agents 
 - **advance_phase(project_id)** — Complete current phase and start next
 
 ### Feature Management (Plan & Implement phases)
+
+**CRITICAL: ALWAYS use these MCP tools for feature/DAG state. NEVER read feature_dag.json directly — the database is the source of truth.**
+
+- **create_features_batch(project_id, features)** — Batch create features with dependencies (use feature names in depends_on — auto-resolved to IDs)
+- **create_feature(project_id, name, description, depends_on, acceptance_criteria, priority)** — Add a single feature
 - **list_features(project_id)** — List all features with status
-- **create_feature(project_id, name, description, depends_on, acceptance_criteria, priority)** — Add a feature to the DAG
+- **get_dag_summary(project_id)** — Comprehensive DAG overview: what's done, in progress, blocked, ready, with feature lists per status
+- **get_ready_features(project_id)** — Which features can start now (all dependencies satisfied)
+- **get_next_wave(project_id)** — What features will unlock after the current in-progress ones complete
+- **get_feature_details(project_id, feature_name)** — Deep view of a specific feature (deps, blocking, unlocks, timing)
+- **update_feature_status(project_id, feature_name, status, agent_name)** — Update a feature's status (planned/in_progress/complete/blocked/deferred)
 - **get_feature_dag_status(project_id)** — Get DAG summary (ready features, completion %, critical path)
 - **execute_ready_features(project_id, max_parallel)** — Start autonomous execution of ready features (creates a builder agent per ready feature)
 
@@ -199,15 +208,16 @@ command_agent("research-agent", "The user stated: [goals], [users]. Now explore 
 ```
 
 ### Implement Phase (Autonomous Execution) — Parallel Sub-Agents
-1. Verify the feature DAG is valid and complete
-2. Use `execute_ready_features` to start autonomous execution, OR manually:
-   a. Check `get_feature_dag_status` for ready features
-   b. For each ready feature, `create_agent` with fresh context and the feature spec
-   c. `command_agent` each builder with feature implementation instructions
-   d. Monitor progress and delete completed agents
-3. Features without dependencies run in parallel
-4. Each feature gets a **fresh-context agent** with the spec and feature details
-5. When all features complete, advance to Deploy
+
+**CRITICAL: Use `get_dag_summary` and `get_ready_features` to check feature state — NEVER read feature_dag.json directly.**
+
+1. Use `get_dag_summary` to see all features and their statuses
+2. Use `get_ready_features` to see which features can start
+3. Use `execute_ready_features` to launch builder agents for ready features
+4. Use `get_next_wave` to see what unlocks after current work finishes
+5. Features without dependencies run in parallel — each gets a fresh-context builder agent
+6. Monitor with `get_dag_summary` — do NOT advance until completion is 100%
+7. The system will block `complete_phase`/`advance_phase` if any features are incomplete
 
 ### Multi-Project Management
 - You can have agents running across multiple projects simultaneously
@@ -227,7 +237,8 @@ Check context usage via `report_cost` or `check_agent_status`.
 ## Important Notes
 
 - **NEVER do implementation work yourself** — always delegate to sub-agents
-- Each project's state lives in its `.rapids/` directory within the repo
+- **NEVER read feature_dag.json directly** — always use MCP tools (`get_dag_summary`, `get_ready_features`, `get_feature_details`) which query the database
+- Each project's state lives in its `.rapids/` directory within the repo (but feature state is in the database)
 - Always provide clear, specific instructions to agents
 - During Implement, prefer parallel execution of independent features
 - Let agents work — don't check status too eagerly
