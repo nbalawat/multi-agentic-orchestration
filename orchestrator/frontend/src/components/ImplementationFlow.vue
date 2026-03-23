@@ -58,7 +58,7 @@ async function initialize() {
   const projectId = workspaceStore.activeProjectId
   if (projectId) {
     // Only re-fetch if store is empty or project changed
-    if (!flowStore.isActive || flowStore.features.size === 0) {
+    if (!flowStore.isActive || Object.keys(flowStore.features).length === 0) {
       await flowStore.initializeFromDag(projectId)
     }
   }

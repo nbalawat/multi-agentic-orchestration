@@ -117,7 +117,7 @@ watch(showFlowTab, (show) => {
   if (show) {
     centerView.value = 'flow'
     // Ensure flow store is initialized when tab becomes visible
-    if (flowStore.features.size === 0 && workspaceStore.activeProjectId) {
+    if (Object.keys(flowStore.features).length === 0 && workspaceStore.activeProjectId) {
       flowStore.initializeFromDag(workspaceStore.activeProjectId)
     }
   } else {
