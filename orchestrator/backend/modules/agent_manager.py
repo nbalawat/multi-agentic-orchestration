@@ -2407,6 +2407,25 @@ class AgentManager:
                 "env": env_vars,
                 "setting_sources": ["user", "project"],  # Required for SDK skill auto-discovery
             }
+
+            # Inject feature management MCP tools for phase agents with a project_id
+            phase_project_id = metadata.get("project_id")
+            if phase_project_id:
+                feature_tools = self._create_feature_tools(phase_project_id)
+                features_mcp = create_sdk_mcp_server(
+                    name="features", version="1.0.0", tools=feature_tools
+                )
+                agent_options["mcp_servers"] = {"features": features_mcp}
+                # Add feature tool names to allowed tools
+                feature_tool_names = [
+                    "mcp__features__create_features",
+                    "mcp__features__list_project_features",
+                    "mcp__features__validate_feature_dag",
+                    "mcp__features__delete_feature",
+                ]
+                tools_to_use.extend(feature_tool_names)
+                agent_options["allowed_tools"] = tools_to_use
+                self.logger.info(f"Injected feature MCP tools for agent '{name}' (project: {phase_project_id})")
             if agent_cwd != self.working_dir:
                 self.logger.info(f"Agent '{name}' will work in worktree: {agent_cwd}")
 
@@ -2815,6 +2834,154 @@ class AgentManager:
 
             except Exception as e:
                 self.logger.error(f"[AutoMerge] Failed to check next wave: {e}")
+
+    def _create_feature_tools(self, project_id: str) -> List:
+        """Create feature management MCP tools scoped to a specific project.
+
+        These tools are injected into planner/phase agents so they can
+        create and manage features directly in the database.
+        """
+
+        @tool(
+            "create_features",
+            "Create multiple features with dependencies for the project. "
+            "Pass a JSON array of features. Each feature: {name, description, priority (int), "
+            "depends_on: [feature_name, ...], acceptance_criteria: [...], estimated_complexity: 'low'|'medium'|'high'}. "
+            "Use feature NAMES (not IDs) in depends_on — they resolve automatically.",
+            {"features": str},
+        )
+        async def create_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                import json as _json
+                features_raw = args.get("features", "[]")
+                features_list = _json.loads(features_raw) if isinstance(features_raw, str) else features_raw
+
+                if not features_list:
+                    return {"content": [{"type": "text", "text": "Error: features array is empty"}], "is_error": True}
+
+                # Resolve name-based dependencies
+                name_to_id: Dict[str, str] = {}
+
+                # Load existing features first
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/features", timeout=15.0)
+                    for f in resp.json().get("features", []):
+                        name_to_id[f["name"]] = str(f["id"])
+
+                created = []
+                for feat in features_list:
+                    # Resolve depends_on names to IDs
+                    raw_deps = feat.get("depends_on", [])
+                    resolved_deps = [name_to_id.get(d, d) for d in raw_deps]
+
+                    payload = {
+                        "name": feat["name"],
+                        "description": feat.get("description", ""),
+                        "priority": feat.get("priority", 0),
+                        "depends_on": resolved_deps,
+                        "acceptance_criteria": feat.get("acceptance_criteria", []),
+                        "estimated_complexity": feat.get("estimated_complexity"),
+                    }
+
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            f"{_API_BASE}/api/projects/{project_id}/features",
+                            json=payload, timeout=15.0,
+                        )
+                        result = resp.json()
+                        fid = result.get("feature", {}).get("id", "")
+                        name_to_id[feat["name"]] = str(fid)
+                        created.append(f"  - {feat['name']} (id: {str(fid)[:8]})")
+
+                return {"content": [{"type": "text", "text":
+                    f"Created {len(created)} features:\n" + "\n".join(created)
+                }]}
+            except Exception as e:
+                self.logger.error(f"create_features tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "list_project_features",
+            "List all features for this project with their status, dependencies, and priority.",
+            {},
+        )
+        async def list_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                dag = await FeatureDAG.from_database(project_id)
+                if dag.feature_count == 0:
+                    return {"content": [{"type": "text", "text": "No features yet. Use create_features to add them."}]}
+
+                lines = [f"## {dag.feature_count} features:\n"]
+                for f in sorted(dag._features.values(), key=lambda x: x.priority):
+                    deps = f", deps: [{', '.join(f.depends_on)}]" if f.depends_on else ""
+                    lines.append(f"  - **{f.name}** (P{f.priority}, {f.status}){deps}")
+
+                summary = dag.status_summary()
+                lines.append(f"\nSummary: {summary}")
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "validate_feature_dag",
+            "Validate the feature DAG: check for cycles, missing dependencies, and structural issues.",
+            {},
+        )
+        async def validate_dag_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                dag = await FeatureDAG.from_database(project_id)
+                if dag.feature_count == 0:
+                    return {"content": [{"type": "text", "text": "No features to validate."}]}
+
+                errors = dag.validate()
+                if not errors:
+                    groups = dag.get_parallel_groups()
+                    return {"content": [{"type": "text", "text":
+                        f"DAG is valid. {dag.feature_count} features in {len(groups)} waves. "
+                        f"Ready to execute: {len(dag.get_ready_features())} features."
+                    }]}
+                else:
+                    return {"content": [{"type": "text", "text":
+                        f"DAG has {len(errors)} issues:\n" + "\n".join(f"  - {e}" for e in errors)
+                    }], "is_error": True}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "delete_feature",
+            "Delete a feature by name. REQUIRED: feature_name.",
+            {"feature_name": str},
+        )
+        async def delete_feature_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                feature_name = args.get("feature_name", "")
+                if not feature_name:
+                    return {"content": [{"type": "text", "text": "Error: feature_name is required"}], "is_error": True}
+
+                # Find feature by name
+                dag = await FeatureDAG.from_database(project_id)
+                feature_id = None
+                for f in dag._features.values():
+                    if f.name == feature_name:
+                        feature_id = f.id
+                        break
+
+                if not feature_id:
+                    return {"content": [{"type": "text", "text": f"Feature '{feature_name}' not found"}], "is_error": True}
+
+                # Delete from DB
+                from .database import get_connection
+                async with get_connection() as conn:
+                    await conn.execute(
+                        "DELETE FROM features WHERE id = $1 AND project_id = $2",
+                        uuid.UUID(feature_id), uuid.UUID(project_id),
+                    )
+
+                return {"content": [{"type": "text", "text": f"Deleted feature '{feature_name}'"}]}
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        return [create_features_tool, list_features_tool, validate_dag_tool, delete_feature_tool]
 
     def _create_cleanup_hook(self, agent_id: uuid.UUID, agent_name: str):
         """Create a Stop hook that auto-archives the agent after completion.

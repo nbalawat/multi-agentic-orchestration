@@ -25,39 +25,38 @@ Review the analysis artifacts before proceeding:
 5. **Specification Writing**: For each feature, write a self-contained spec with acceptance criteria, file paths, API contracts, and test requirements.
 
 ## Artifacts to Produce
-Save all outputs to the project's `.rapids/plan/` directory:
+
+### 1. Feature DAG (Database — use MCP tools)
+
+**CRITICAL: Use the `create_features` MCP tool to create features in the database. Do NOT write feature_dag.json manually.**
+
+You have these MCP tools available:
+- **`create_features(features)`** — Create features with dependencies. Pass a JSON array:
+  ```json
+  [
+    {"name": "auth-models", "description": "User and session models", "priority": 1, "depends_on": [], "acceptance_criteria": ["User model exists", "Session model exists"], "estimated_complexity": "medium"},
+    {"name": "auth-endpoints", "description": "Login/logout API", "priority": 1, "depends_on": ["auth-models"], "acceptance_criteria": ["POST /login works", "POST /logout works"], "estimated_complexity": "medium"}
+  ]
+  ```
+  Use feature NAMES in `depends_on` — they resolve automatically.
+- **`list_project_features()`** — List all features with status and dependencies
+- **`validate_feature_dag()`** — Check for cycles, missing deps, structural issues
+- **`delete_feature(feature_name)`** — Remove a feature if you need to restructure
+
+### 2. File Artifacts (write to `.rapids/plan/`)
 
 | File | Description | Required |
 |------|-------------|----------|
-| `feature-list.md` | Complete list of features with names, categories, descriptions | Yes |
-| `feature_dag.json` | Machine-readable dependency graph (see format below) | Yes |
-| `feature-dag.md` | Human-readable dependency visualization | Optional |
-| `execution-waves.md` | Features grouped into ordered implementation waves | Optional |
 | `specification.md` | Master project specification (goals, architecture, conventions) | Yes |
 | `features/<name>/spec.md` | Self-contained spec per feature | Yes |
 | `features/<name>/acceptance-criteria.md` | Testable acceptance criteria per feature | Yes |
-
-### Feature DAG JSON Format
-```json
-{
-  "features": [
-    {
-      "id": "feature-id",
-      "name": "Feature Name",
-      "description": "Brief description",
-      "dependencies": ["other-feature-id"],
-      "priority": 1,
-      "estimated_effort": "small|medium|large",
-      "status": "not_started"
-    }
-  ]
-}
-```
+| `feature-list.md` | Human-readable list of features with descriptions | Optional |
+| `execution-waves.md` | Features grouped into ordered implementation waves | Optional |
 
 ## Completion Criteria
 Your work is done when:
-- `feature-list.md` lists all features
-- `feature_dag.json` is valid (acyclic, all dependencies exist)
+- Features are created in the database via `create_features` tool
+- `validate_feature_dag()` passes with no errors
 - `specification.md` provides full project context
 - Every feature has `features/<name>/spec.md` with enough detail for autonomous implementation
 - Every feature has `features/<name>/acceptance-criteria.md` with 3+ testable criteria
