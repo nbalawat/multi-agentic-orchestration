@@ -125,9 +125,9 @@ watch(showFlowTab, (show) => {
   }
 })
 
-// Also re-initialize when user manually clicks the flow tab
+// Always re-initialize when user switches to the flow tab
 watch(centerView, (view) => {
-  if (view === 'flow' && flowStore.features.size === 0 && workspaceStore.activeProjectId) {
+  if (view === 'flow' && workspaceStore.activeProjectId) {
     flowStore.initializeFromDag(workspaceStore.activeProjectId)
   }
 })

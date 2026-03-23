@@ -1333,6 +1333,13 @@ class AgentManager:
 
                 ready_features = [all_features[fid] for fid in ready_feature_ids if fid in all_features]
 
+                # Filter out features that already have a builder agent registered
+                active_feature_ids = {info["feature_id"] for info in self._builder_registry.values()}
+                ready_features = [f for f in ready_features if f.get("id") not in active_feature_ids]
+
+                if not ready_features:
+                    return {"content": [{"type": "text", "text": "All ready features already have builder agents running."}]}
+
                 # Limit parallelism
                 features_to_execute = ready_features[:max_parallel]
                 agents_created = []
@@ -1425,6 +1432,13 @@ class AgentManager:
                 # Launch all agents in parallel using asyncio tasks
                 async def _launch_builder(entry):
                     """Create and dispatch a single builder agent with worktree isolation."""
+                    # Guard: skip if agent with this name already exists (prevents duplicates)
+                    from .database import get_agent_by_name
+                    existing = await get_agent_by_name(self.orchestrator_agent_id, entry["agent"])
+                    if existing and not existing.archived:
+                        self.logger.info(f"Agent '{entry['agent']}' already exists, skipping")
+                        entry["status"] = "already_exists"
+                        return
                     try:
                         # Create git worktree for this feature
                         worktree_path = None
@@ -2783,16 +2797,9 @@ class AgentManager:
                         },
                     })
 
-                    # Notify the orchestrator to launch next wave
-                    if self._on_agent_complete_callback:
-                        wave_msg = (
-                            f"Wave complete! {len(ready_features)} features ready for next wave. "
-                            f"DAG: {completed}/{total} complete. "
-                            f"Use execute_ready_features to launch the next wave."
-                        )
-                        asyncio.create_task(
-                            self._on_agent_complete_callback(agent_name, wave_msg)
-                        )
+                    # Wave transition is handled via WebSocket events + chat notifications.
+                    # Do NOT call _on_agent_complete_callback here — it injects messages
+                    # into the orchestrator conversation causing re-execution loops.
 
                 elif completed == total:
                     self.logger.info(f"[AutoMerge] All features complete! DAG 100%")
