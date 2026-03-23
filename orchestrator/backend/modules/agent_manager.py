@@ -83,7 +83,7 @@ from .rapids_database import (
 _API_BASE = f"http://{config.BACKEND_HOST}:{config.BACKEND_PORT}"
 from .workspace_manager import WorkspaceManager
 from .plugin_loader import PluginLoader
-from .feature_dag import FeatureDAG
+from .feature_dag import FeatureDAG, FeatureNode
 from .project_state import ProjectState
 from .phase_engine import PhaseEngine
 from .git_worktree import GitWorktreeManager
@@ -1612,6 +1612,349 @@ class AgentManager:
                     "is_error": True,
                 }
 
+        # ══════════════════════════════════════════════════════════
+        # FEATURE LIFECYCLE MCP TOOLS
+        # ══════════════════════════════════════════════════════════
+
+        @tool(
+            "create_features_batch",
+            "Create multiple features with dependencies in one call. REQUIRED: project_id, features (JSON array). "
+            "Each feature: {name, description, priority, depends_on: [feature_name_or_id, ...], acceptance_criteria: [...]}. "
+            "Use feature names in depends_on — they will be resolved to IDs automatically.",
+            {"project_id": str, "features": str},
+        )
+        async def create_features_batch_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Batch create features with dependency resolution."""
+            try:
+                import json as _json
+                project_id = args.get("project_id")
+                features_raw = args.get("features", "[]")
+
+                if not project_id:
+                    return {"content": [{"type": "text", "text": "Error: 'project_id' is required"}], "is_error": True}
+
+                features_list = _json.loads(features_raw) if isinstance(features_raw, str) else features_raw
+
+                # Create features in order, resolving name-based deps
+                name_to_id: Dict[str, str] = {}
+                created = []
+
+                # First pass: load existing features to resolve deps to them
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/features", timeout=15.0)
+                    existing = resp.json().get("features", [])
+                    for f in existing:
+                        name_to_id[f["name"]] = str(f["id"])
+
+                for feat_data in features_list:
+                    # Resolve depends_on names to IDs
+                    raw_deps = feat_data.get("depends_on", [])
+                    resolved_deps = []
+                    for dep in raw_deps:
+                        if dep in name_to_id:
+                            resolved_deps.append(name_to_id[dep])
+                        else:
+                            resolved_deps.append(dep)  # assume it's already an ID
+
+                    payload = {
+                        "name": feat_data["name"],
+                        "description": feat_data.get("description", ""),
+                        "priority": feat_data.get("priority", 0),
+                        "depends_on": resolved_deps,
+                        "acceptance_criteria": feat_data.get("acceptance_criteria", []),
+                        "estimated_complexity": feat_data.get("estimated_complexity"),
+                    }
+
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(
+                            f"{_API_BASE}/api/projects/{project_id}/features",
+                            json=payload,
+                            timeout=15.0,
+                        )
+                        result = resp.json()
+                        feat_id = result.get("feature", {}).get("id", "")
+                        name_to_id[feat_data["name"]] = str(feat_id)
+                        created.append(f"  - {feat_data['name']} (id: {str(feat_id)[:8]})")
+
+                return {
+                    "content": [{"type": "text", "text":
+                        f"Created {len(created)} features for project {project_id}:\n" +
+                        "\n".join(created)
+                    }]
+                }
+            except Exception as e:
+                self.logger.error(f"create_features_batch tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "get_dag_summary",
+            "Get a comprehensive summary of the feature DAG: what's done, in progress, blocked, ready, completion %. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def get_dag_summary_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Comprehensive DAG summary with per-status feature lists."""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {"content": [{"type": "text", "text": "Error: 'project_id' is required"}], "is_error": True}
+
+                dag = await FeatureDAG.from_database(project_id)
+                summary = dag.status_summary()
+                completion = dag.completion_percentage()
+                groups = dag.get_parallel_groups()
+
+                lines = [
+                    f"## DAG Summary — {dag.feature_count} features\n",
+                    f"Completion: {completion:.0f}%\n",
+                    f"Planned: {summary.get('planned', 0)} | In Progress: {summary.get('in_progress', 0)} | "
+                    f"Complete: {summary.get('complete', 0)} | Blocked: {summary.get('blocked', 0)} | "
+                    f"Deferred: {summary.get('deferred', 0)}\n",
+                    f"Waves: {len(groups)}\n",
+                ]
+
+                # List features by status
+                for status in ["in_progress", "complete", "blocked", "planned", "deferred"]:
+                    features_in_status = [f for f in dag._features.values() if f.status == status]
+                    if features_in_status:
+                        lines.append(f"\n### {status.upper()} ({len(features_in_status)})")
+                        for f in features_in_status:
+                            agent_info = f" [agent: {f.assigned_agent}]" if f.assigned_agent else ""
+                            deps_info = f" (deps: {', '.join(f.depends_on)})" if f.depends_on else ""
+                            lines.append(f"  - {f.name} (P{f.priority}){agent_info}{deps_info}")
+
+                try:
+                    critical_path = dag.critical_path()
+                    if critical_path:
+                        lines.append(f"\nCritical Path ({len(critical_path)} deep): {' → '.join(critical_path)}")
+                except Exception:
+                    pass
+
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            except Exception as e:
+                self.logger.error(f"get_dag_summary tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "get_ready_features",
+            "Get features that are ready to execute (all dependencies satisfied, status=planned). REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def get_ready_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """List features ready for execution."""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {"content": [{"type": "text", "text": "Error: 'project_id' is required"}], "is_error": True}
+
+                dag = await FeatureDAG.from_database(project_id)
+                ready_ids = dag.get_ready_features()
+                ready_features = [dag._features[fid] for fid in ready_ids if fid in dag._features]
+
+                if not ready_features:
+                    summary = dag.status_summary()
+                    return {"content": [{"type": "text", "text":
+                        f"No features ready. DAG: {summary.get('complete', 0)}/{dag.feature_count} complete, "
+                        f"{summary.get('in_progress', 0)} in progress, {summary.get('blocked', 0)} blocked."
+                    }]}
+
+                lines = [f"## {len(ready_features)} features ready to execute:\n"]
+                for f in sorted(ready_features, key=lambda x: x.priority):
+                    deps = f", depends_on: {', '.join(f.depends_on)}" if f.depends_on else ""
+                    lines.append(f"  - **{f.name}** (P{f.priority}, id: {f.id[:8]}){deps}")
+
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            except Exception as e:
+                self.logger.error(f"get_ready_features tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "get_next_wave",
+            "Show what features will be unlocked after the currently in-progress features complete. REQUIRED: project_id.",
+            {"project_id": str},
+        )
+        async def get_next_wave_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Predict what features unlock next based on current in-progress work."""
+            try:
+                project_id = args.get("project_id")
+                if not project_id:
+                    return {"content": [{"type": "text", "text": "Error: 'project_id' is required"}], "is_error": True}
+
+                dag = await FeatureDAG.from_database(project_id)
+
+                # Find in-progress features
+                in_progress = [f for f in dag._features.values() if f.status == "in_progress"]
+                in_progress_ids = {f.id for f in in_progress}
+
+                if not in_progress:
+                    ready = dag.get_ready_features()
+                    return {"content": [{"type": "text", "text":
+                        f"No features currently in progress. {len(ready)} features are ready to start."
+                    }]}
+
+                # Simulate: what becomes ready if all in-progress features complete?
+                will_unlock = []
+                for feat in dag._features.values():
+                    if feat.status != "planned":
+                        continue
+                    # Check if all deps are either complete OR currently in-progress
+                    all_satisfied = all(
+                        dag._features.get(dep, FeatureNode(id="", name="")).status == "complete"
+                        or dep in in_progress_ids
+                        for dep in feat.depends_on
+                    )
+                    # But at least one dep is in-progress (not already all complete)
+                    has_in_progress_dep = any(dep in in_progress_ids for dep in feat.depends_on)
+                    if all_satisfied and has_in_progress_dep:
+                        will_unlock.append(feat)
+
+                lines = [
+                    f"## Currently building ({len(in_progress)}):\n",
+                ]
+                for f in in_progress:
+                    lines.append(f"  - {f.name} [agent: {f.assigned_agent or 'unassigned'}]")
+
+                if will_unlock:
+                    lines.append(f"\n## Will unlock when current wave completes ({len(will_unlock)}):\n")
+                    for f in sorted(will_unlock, key=lambda x: x.priority):
+                        blocking = [d for d in f.depends_on if d in in_progress_ids]
+                        blocking_names = [dag._features[d].name for d in blocking if d in dag._features]
+                        lines.append(f"  - **{f.name}** (P{f.priority}) — blocked by: {', '.join(blocking_names)}")
+                else:
+                    lines.append("\nNo additional features will unlock after current wave.")
+
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            except Exception as e:
+                self.logger.error(f"get_next_wave tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "get_feature_details",
+            "Get detailed information about a specific feature. REQUIRED: project_id, feature_name.",
+            {"project_id": str, "feature_name": str},
+        )
+        async def get_feature_details_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Deep view of a specific feature."""
+            try:
+                project_id = args.get("project_id")
+                feature_name = args.get("feature_name", "")
+                if not project_id or not feature_name:
+                    return {"content": [{"type": "text", "text": "Error: 'project_id' and 'feature_name' required"}], "is_error": True}
+
+                dag = await FeatureDAG.from_database(project_id)
+
+                # Find by name or ID
+                feat = None
+                for f in dag._features.values():
+                    if f.name == feature_name or f.id == feature_name or f.id.startswith(feature_name):
+                        feat = f
+                        break
+
+                if not feat:
+                    return {"content": [{"type": "text", "text": f"Feature '{feature_name}' not found"}], "is_error": True}
+
+                # Get dependents (features that depend on this one)
+                dependents = [f.name for f in dag._features.values() if feat.id in f.depends_on]
+
+                # Get blocking features (incomplete deps)
+                blocking = []
+                for dep_id in feat.depends_on:
+                    dep = dag._features.get(dep_id)
+                    if dep and dep.status != "complete":
+                        blocking.append(f"{dep.name} ({dep.status})")
+
+                lines = [
+                    f"## Feature: {feat.name}\n",
+                    f"ID: {feat.id}",
+                    f"Status: {feat.status}",
+                    f"Priority: P{feat.priority}",
+                    f"Category: {feat.category or 'none'}",
+                    f"Complexity: {feat.estimated_complexity or 'unknown'}",
+                    f"Agent: {feat.assigned_agent or 'unassigned'}",
+                ]
+
+                if feat.description:
+                    lines.append(f"\nDescription: {feat.description}")
+
+                if feat.acceptance_criteria:
+                    lines.append("\nAcceptance Criteria:")
+                    for ac in feat.acceptance_criteria:
+                        lines.append(f"  - {ac}")
+
+                if feat.depends_on:
+                    dep_names = [dag._features[d].name if d in dag._features else d for d in feat.depends_on]
+                    lines.append(f"\nDepends on: {', '.join(dep_names)}")
+
+                if blocking:
+                    lines.append(f"Blocked by: {', '.join(blocking)}")
+
+                if dependents:
+                    lines.append(f"Unlocks: {', '.join(dependents)}")
+
+                if feat.started_at:
+                    lines.append(f"\nStarted: {feat.started_at}")
+                if feat.completed_at:
+                    lines.append(f"Completed: {feat.completed_at}")
+
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+            except Exception as e:
+                self.logger.error(f"get_feature_details tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
+        @tool(
+            "update_feature_status",
+            "Update a feature's status. REQUIRED: project_id, feature_name, status (planned/in_progress/complete/blocked/deferred). OPTIONAL: agent_name.",
+            {"project_id": str, "feature_name": str, "status": str, "agent_name": str},
+        )
+        async def update_feature_status_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+            """Update feature status with proper DAG state management."""
+            try:
+                project_id = args.get("project_id")
+                feature_name = args.get("feature_name", "")
+                new_status = args.get("status", "")
+                agent_name = args.get("agent_name")
+
+                if not project_id or not feature_name or not new_status:
+                    return {"content": [{"type": "text", "text": "Error: project_id, feature_name, and status required"}], "is_error": True}
+
+                valid_statuses = ["planned", "in_progress", "complete", "blocked", "deferred"]
+                if new_status not in valid_statuses:
+                    return {"content": [{"type": "text", "text": f"Error: status must be one of {valid_statuses}"}], "is_error": True}
+
+                dag = await FeatureDAG.from_database(project_id)
+
+                # Find feature by name or ID
+                feature_id = None
+                for f in dag._features.values():
+                    if f.name == feature_name or f.id == feature_name or f.id.startswith(feature_name):
+                        feature_id = f.id
+                        break
+
+                if not feature_id:
+                    return {"content": [{"type": "text", "text": f"Feature '{feature_name}' not found"}], "is_error": True}
+
+                # Apply status change via DAG methods
+                newly_ready = []
+                if new_status == "in_progress":
+                    dag.mark_in_progress(feature_id, agent_name)
+                elif new_status == "complete":
+                    newly_ready = dag.mark_complete(feature_id)
+                elif new_status == "blocked":
+                    dag.mark_blocked(feature_id, "Manually blocked")
+                else:
+                    dag._features[feature_id].status = new_status
+
+                await dag.save_to_database(project_id)
+
+                result = f"Feature '{feature_name}' → {new_status}"
+                if newly_ready:
+                    ready_names = [dag._features[r].name for r in newly_ready if r in dag._features]
+                    result += f"\nNewly unblocked: {', '.join(ready_names)}"
+
+                return {"content": [{"type": "text", "text": result}]}
+            except Exception as e:
+                self.logger.error(f"update_feature_status tool error: {e}", exc_info=True)
+                return {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "is_error": True}
+
         return [
             create_agent_tool,
             list_agents_tool,
@@ -1635,6 +1978,13 @@ class AgentManager:
             get_feature_dag_status_tool,
             execute_ready_features_tool,
             list_plugin_capabilities_tool,
+            # Feature lifecycle tools
+            create_features_batch_tool,
+            get_dag_summary_tool,
+            get_ready_features_tool,
+            get_next_wave_tool,
+            get_feature_details_tool,
+            update_feature_status_tool,
         ]
 
     def _create_agent_can_use_tool(self, agent_id: uuid.UUID, agent_name: str):

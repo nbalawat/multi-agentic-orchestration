@@ -95,6 +95,53 @@ class FeatureDAG:
         return dag
 
     # ------------------------------------------------------------------ #
+    #  Database-primary loading / saving
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    async def from_database(cls, project_id: str) -> "FeatureDAG":
+        """Load DAG from the features database table (primary source of truth)."""
+        import uuid as _uuid
+        from .rapids_database import load_dag_features
+
+        dag = cls()
+        features = await load_dag_features(_uuid.UUID(str(project_id)))
+        for f in features:
+            node = FeatureNode(
+                id=str(f.id),
+                name=f.name,
+                description=f.description,
+                category=getattr(f, "category", None),
+                priority=f.priority,
+                depends_on=f.depends_on or [],
+                acceptance_criteria=f.acceptance_criteria or [],
+                estimated_complexity=f.estimated_complexity,
+                spec_file=f.spec_file,
+                status=f.status or "planned",
+                assigned_agent=getattr(f, "assigned_agent", None),
+                started_at=f.started_at.isoformat() if getattr(f, "started_at", None) else None,
+                completed_at=f.completed_at.isoformat() if getattr(f, "completed_at", None) else None,
+            )
+            dag._features[node.id] = node
+        return dag
+
+    async def save_to_database(self, project_id: str) -> None:
+        """Persist current in-memory DAG state back to the database."""
+        from .rapids_database import update_feature_dag_status
+
+        import uuid as _uuid
+        pid = _uuid.UUID(str(project_id))
+        for feat in self._features.values():
+            await update_feature_dag_status(
+                project_id=pid,
+                feature_id=feat.id,
+                status=feat.status,
+                assigned_agent=feat.assigned_agent,
+                started_at=feat.started_at,
+                completed_at=feat.completed_at,
+            )
+
+    # ------------------------------------------------------------------ #
     #  Feature management
     # ------------------------------------------------------------------ #
 

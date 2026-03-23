@@ -64,6 +64,12 @@ export interface WebSocketCallbacks {
   onAgentSummaryUpdate?: (data: any) => void
   onOrchestratorUpdated?: (data: any) => void
   onAskUserQuestion?: (data: any) => void
+  onFeatureStarted?: (data: any) => void
+  onFeatureMerged?: (data: any) => void
+  onFeatureMergeFailed?: (data: any) => void
+  onDagProgress?: (data: any) => void
+  onWaveTransition?: (data: any) => void
+  onDagComplete?: (data: any) => void
   onError: (error: any) => void
   onConnected?: () => void
   onDisconnected?: () => void

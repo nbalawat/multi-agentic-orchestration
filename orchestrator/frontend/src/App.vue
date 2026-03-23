@@ -26,14 +26,33 @@
         </template>
       </WorkspaceSidebar>
 
-      <EventStream
-        ref="eventStreamRef"
-        class="app-content center"
-        :events="store.filteredEventStream"
-        :current-filter="store.eventStreamFilter"
-        :auto-scroll="true"
-        @set-filter="handleSetFilter"
-      />
+      <div class="app-content center">
+        <!-- Tab bar for center column (flow tab only during implement phase) -->
+        <div v-if="showFlowTab" class="center-tabs">
+          <button
+            class="center-tab"
+            :class="{ active: centerView === 'events' }"
+            @click="centerView = 'events'"
+          >Event Stream</button>
+          <button
+            class="center-tab"
+            :class="{ active: centerView === 'flow' }"
+            @click="centerView = 'flow'"
+          >Implementation Flow</button>
+        </div>
+
+        <EventStream
+          v-show="centerView === 'events'"
+          ref="eventStreamRef"
+          :events="store.filteredEventStream"
+          :current-filter="store.eventStreamFilter"
+          :auto-scroll="true"
+          @set-filter="handleSetFilter"
+        />
+        <ImplementationFlow
+          v-show="centerView === 'flow'"
+        />
+      </div>
 
       <div class="app-sidebar right">
         <OrchestratorChat
@@ -56,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import AgentList from './components/AgentList.vue'
 import WorkspaceSidebar from './components/WorkspaceSidebar.vue'
@@ -65,6 +84,7 @@ import OrchestratorChat from './components/OrchestratorChat.vue'
 import QuestionPanel from './components/QuestionPanel.vue'
 import ProjectContextBar from './components/ProjectContextBar.vue'
 import GlobalCommandInput from './components/GlobalCommandInput.vue'
+import ImplementationFlow from './components/ImplementationFlow.vue'
 import { useOrchestratorStore } from './stores/orchestratorStore'
 import { useWorkspaceStore } from './stores/workspaceStore'
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts'
@@ -81,6 +101,19 @@ const eventStreamRef = ref<InstanceType<typeof EventStream> | null>(null)
 
 // Sidebar collapse state
 const isSidebarCollapsed = ref(false)
+
+// Center column tab: 'events' or 'flow'
+const centerView = ref<'events' | 'flow'>('events')
+const showFlowTab = computed(() => {
+  const phase = workspaceStore.activeProject?.current_phase
+  return phase === 'implement'
+})
+
+// Auto-switch to flow view when entering implement phase
+watch(showFlowTab, (show) => {
+  if (show) centerView.value = 'flow'
+  else centerView.value = 'events'
+})
 
 // Initialize store on mount
 onMounted(() => {
@@ -174,6 +207,43 @@ const handleOnboardProject = () => {
 .app-content {
   height: 100%;
   overflow: hidden;
+}
+
+.app-content.center {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Center column tabs */
+.center-tabs {
+  display: flex;
+  gap: 0;
+  background: #0d1117;
+  border-bottom: 1px solid #21262d;
+  flex-shrink: 0;
+}
+
+.center-tab {
+  padding: 6px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #8b949e;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.center-tab:hover {
+  color: #c9d1d9;
+}
+
+.center-tab.active {
+  color: #86BC24;
+  border-bottom-color: #86BC24;
 }
 
 .app-sidebar.right {

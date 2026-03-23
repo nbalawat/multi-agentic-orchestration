@@ -1492,11 +1492,32 @@ async def get_feature_dag(project_id: str):
                 status_code=400, detail="Project has no repo_path configured"
             )
 
-        dag_path = Path(repo_path) / ".rapids" / "plan" / "feature_dag.json"
-        dag = FeatureDAG(dag_path=dag_path)
+        # Load DAG from database (primary source of truth)
+        dag = await FeatureDAG.from_database(project_id)
 
-        if dag_path.exists():
-            dag.load()
+        # Fallback: if DB has no features, try loading from file and importing
+        if dag.feature_count == 0:
+            dag_path = Path(repo_path) / ".rapids" / "plan" / "feature_dag.json"
+            if dag_path.exists():
+                dag.load(dag_path)
+                # Import file features to DB for future loads
+                if dag.feature_count > 0:
+                    from modules.rapids_database import bulk_create_features
+                    file_features = [
+                        {
+                            "name": f.name,
+                            "description": f.description,
+                            "depends_on": f.depends_on,
+                            "acceptance_criteria": f.acceptance_criteria,
+                            "priority": f.priority,
+                            "estimated_complexity": f.estimated_complexity,
+                            "spec_file": f.spec_file,
+                        }
+                        for f in dag._features.values()
+                    ]
+                    await bulk_create_features(uuid.UUID(project_id), file_features)
+                    # Reload from DB to get proper UUIDs
+                    dag = await FeatureDAG.from_database(project_id)
 
         logger.http_request("GET", f"/api/projects/{project_id}/dag", 200)
         return {
@@ -1540,20 +1561,18 @@ async def validate_feature_dag(project_id: str):
                 status_code=400, detail="Project has no repo_path configured"
             )
 
-        dag_path = Path(repo_path) / ".rapids" / "plan" / "feature_dag.json"
-        dag = FeatureDAG(dag_path=dag_path)
+        # Load DAG from database
+        dag = await FeatureDAG.from_database(project_id)
 
-        if not dag_path.exists():
+        if dag.feature_count == 0:
             logger.http_request(
                 "POST", f"/api/projects/{project_id}/dag/validate", 200
             )
             return {
                 "status": "success",
                 "valid": False,
-                "errors": ["feature_dag.json not found"],
+                "errors": ["No features found in database"],
             }
-
-        dag.load()
         errors = dag.validate()
 
         logger.http_request(
@@ -1590,20 +1609,17 @@ async def update_feature_status(project_id: str, feature_id: str, request: Reque
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        repo_path = project.repo_path
-        dag_path = Path(repo_path) / ".rapids" / "plan" / "feature_dag.json"
-        dag = FeatureDAG(dag_path=dag_path)
+        # Load DAG from database
+        dag = await FeatureDAG.from_database(project_id)
 
-        if not dag_path.exists():
-            raise HTTPException(status_code=404, detail="feature_dag.json not found")
-
-        dag.load()
+        if dag.feature_count == 0:
+            raise HTTPException(status_code=404, detail="No features found in database")
 
         if new_status == "in_progress":
             dag.mark_in_progress(feature_id, agent_name)
         elif new_status == "complete":
             newly_ready = dag.mark_complete(feature_id)
-            dag.save()
+            await dag.save_to_database(project_id)
             return {
                 "status": "success",
                 "feature_id": feature_id,
@@ -1615,7 +1631,7 @@ async def update_feature_status(project_id: str, feature_id: str, request: Reque
         else:
             raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
 
-        dag.save()
+        await dag.save_to_database(project_id)
         logger.http_request("POST", f"/api/projects/{project_id}/dag/features/{feature_id}/status", 200)
         return {"status": "success", "feature_id": feature_id, "new_status": new_status}
 

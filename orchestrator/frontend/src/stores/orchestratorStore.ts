@@ -26,6 +26,7 @@ import { getEvents } from '../services/eventService'
 import { DEFAULT_EVENT_HISTORY_LIMIT } from '../config/constants'
 import { useAgentPulse } from '../composables/useAgentPulse'
 import { ReliableWebSocket, ConnectionState } from '../services/reliableWebSocket'
+import { useImplementFlowStore } from './implementFlowStore'
 
 // Default orchestrator agent ID (will be loaded from backend on init)
 const DEFAULT_ORCHESTRATOR_ID = 'default-orchestrator'
@@ -363,6 +364,31 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
             }
             chatMessages.value = [...chatMessages.value, chatMsg]
           }
+        },
+        // Implementation Flow events — route to implementFlowStore
+        onFeatureStarted: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleFeatureStarted(message.data || message)
+        },
+        onFeatureMerged: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleFeatureMerged(message.data || message)
+        },
+        onFeatureMergeFailed: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleFeatureMergeFailed(message.data || message)
+        },
+        onDagProgress: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleDagProgress(message.data || message)
+        },
+        onWaveTransition: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleWaveTransition(message.data || message)
+        },
+        onDagComplete: (message) => {
+          const flowStore = useImplementFlowStore()
+          flowStore.handleDagComplete(message.data || message)
         },
         onError: handleWebSocketError,
         onConnected: () => {

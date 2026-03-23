@@ -414,6 +414,30 @@ export class ReliableWebSocket {
         this.callbacks.onAskUserQuestion?.(message)
         break
 
+      case 'feature_started':
+        this.callbacks.onFeatureStarted?.(message)
+        break
+
+      case 'feature_merged':
+        this.callbacks.onFeatureMerged?.(message)
+        break
+
+      case 'feature_merge_failed':
+        this.callbacks.onFeatureMergeFailed?.(message)
+        break
+
+      case 'dag_progress':
+        this.callbacks.onDagProgress?.(message)
+        break
+
+      case 'wave_transition':
+        this.callbacks.onWaveTransition?.(message)
+        break
+
+      case 'dag_complete':
+        this.callbacks.onDagComplete?.(message)
+        break
+
       case 'error':
         this.callbacks.onError(message)
         break

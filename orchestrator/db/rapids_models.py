@@ -190,6 +190,10 @@ class Feature(BaseModel):
     estimated_complexity: Optional[str] = None  # low, medium, high
     assigned_agent_id: Optional[UUID] = None
     spec_file: Optional[str] = None
+    category: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    assigned_agent: Optional[str] = None  # agent name string (for DAG execution)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

@@ -919,3 +919,97 @@ async def bulk_create_features(
         )
         created.append(feature)
     return created
+
+
+# ═══════════════════════════════════════════════════════════
+# DAG-PRIMARY DATABASE FUNCTIONS
+# ═══════════════════════════════════════════════════════════
+
+
+async def load_dag_features(project_id: uuid.UUID) -> List[Feature]:
+    """
+    Load all features for a project, ordered by priority.
+    This is the primary DAG loading function — replaces reading from feature_dag.json.
+    """
+    async with get_connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM features
+            WHERE project_id = $1
+            ORDER BY priority ASC, created_at ASC
+            """,
+            project_id,
+        )
+        return [Feature(**dict(r)) for r in rows]
+
+
+async def update_feature_dag_status(
+    project_id: uuid.UUID,
+    feature_id: str,
+    status: str,
+    assigned_agent: str = None,
+    started_at: str = None,
+    completed_at: str = None,
+) -> Optional[Feature]:
+    """
+    Update a feature's DAG execution status with timestamps.
+    Auto-sets started_at on in_progress and completed_at on complete.
+    feature_id can be a UUID string or a short string ID.
+    """
+    from datetime import datetime, timezone
+
+    async with get_connection() as conn:
+        # Try UUID first, then search by name-based ID
+        try:
+            fid = uuid.UUID(str(feature_id))
+            row = await conn.fetchrow("SELECT id FROM features WHERE id = $1 AND project_id = $2", fid, project_id)
+        except (ValueError, AttributeError):
+            row = None
+
+        if not row:
+            # feature_id might be a string name-based ID — search by name
+            row = await conn.fetchrow(
+                "SELECT id FROM features WHERE project_id = $1 AND name = $2",
+                project_id, feature_id,
+            )
+
+        if not row:
+            return None
+
+        db_id = row["id"]
+        now = datetime.now(timezone.utc)
+
+        # Build update fields
+        updates = ["status = $2", "updated_at = $3"]
+        params = [db_id, status, now]
+        param_idx = 4
+
+        if assigned_agent is not None:
+            updates.append(f"assigned_agent = ${param_idx}")
+            params.append(assigned_agent)
+            param_idx += 1
+
+        # Auto-set timestamps based on status transitions
+        if status == "in_progress" and not started_at:
+            updates.append(f"started_at = ${param_idx}")
+            params.append(now)
+            param_idx += 1
+        elif started_at:
+            updates.append(f"started_at = ${param_idx}")
+            params.append(datetime.fromisoformat(started_at) if isinstance(started_at, str) else started_at)
+            param_idx += 1
+
+        if status in ("complete", "completed") and not completed_at:
+            updates.append(f"completed_at = ${param_idx}")
+            params.append(now)
+            param_idx += 1
+        elif completed_at:
+            updates.append(f"completed_at = ${param_idx}")
+            params.append(datetime.fromisoformat(completed_at) if isinstance(completed_at, str) else completed_at)
+            param_idx += 1
+
+        query = f"UPDATE features SET {', '.join(updates)} WHERE id = $1 RETURNING *"
+        result = await conn.fetchrow(query, *params)
+        if result:
+            return Feature(**dict(result))
+        return None
