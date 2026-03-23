@@ -50,7 +50,15 @@
           @set-filter="handleSetFilter"
         />
         <ImplementationFlow
-          v-show="centerView === 'flow'"
+          v-if="centerView === 'flow'"
+          :key="flowKey"
+          @select-feature="handleFeatureSelect"
+        />
+        <FlowFeatureModal
+          v-if="selectedFlowFeature"
+          :feature="selectedFlowFeature"
+          :visible="!!selectedFlowFeature"
+          @close="selectedFlowFeature = null"
         />
       </div>
 
@@ -85,6 +93,7 @@ import QuestionPanel from './components/QuestionPanel.vue'
 import ProjectContextBar from './components/ProjectContextBar.vue'
 import GlobalCommandInput from './components/GlobalCommandInput.vue'
 import ImplementationFlow from './components/ImplementationFlow.vue'
+import FlowFeatureModal from './components/FlowFeatureModal.vue'
 import { useOrchestratorStore } from './stores/orchestratorStore'
 import { useWorkspaceStore } from './stores/workspaceStore'
 import { useImplementFlowStore } from './stores/implementFlowStore'
@@ -105,6 +114,8 @@ const isSidebarCollapsed = ref(false)
 
 // Center column tab: 'events' or 'flow'
 const centerView = ref<'events' | 'flow'>('events')
+const flowKey = ref(0)
+const selectedFlowFeature = ref<any>(null)
 const showFlowTab = computed(() => {
   const phase = workspaceStore.activeProject?.current_phase
   return phase === 'implement'
@@ -113,22 +124,17 @@ const showFlowTab = computed(() => {
 // Auto-switch to flow view when entering implement phase
 const flowStore = useImplementFlowStore()
 
+// Auto-switch to flow when entering implement phase, but don't force back
 watch(showFlowTab, (show) => {
-  if (show) {
+  if (show && centerView.value === 'events') {
     centerView.value = 'flow'
-    // Ensure flow store is initialized when tab becomes visible
-    if (Object.keys(flowStore.features).length === 0 && workspaceStore.activeProjectId) {
-      flowStore.initializeFromDag(workspaceStore.activeProjectId)
-    }
-  } else {
-    centerView.value = 'events'
   }
 })
 
-// Always re-initialize when user switches to the flow tab
+// Force fresh mount when switching to flow tab
 watch(centerView, (view) => {
-  if (view === 'flow' && workspaceStore.activeProjectId) {
-    flowStore.initializeFromDag(workspaceStore.activeProjectId)
+  if (view === 'flow') {
+    flowKey.value++  // triggers v-if re-mount with fresh data
   }
 })
 
@@ -178,6 +184,13 @@ const handleSelectProject = (projectId: string) => {
 const handleOnboardProject = () => {
   console.log('Onboard project clicked')
   // TODO: Open onboarding modal
+}
+
+const handleFeatureSelect = (featureId: string) => {
+  const feat = flowStore.features[featureId]
+  if (feat) {
+    selectedFlowFeature.value = feat
+  }
 }
 </script>
 

@@ -24,6 +24,7 @@
               v-for="feature in stageFeatures(col.key)"
               :key="feature.id"
               :feature="feature"
+              @click="onFeatureClick(feature.id)"
             />
           </TransitionGroup>
 
@@ -37,7 +38,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch, onActivated } from 'vue'
+import { onMounted } from 'vue'
 import { useImplementFlowStore, STAGE_COLUMNS } from '../stores/implementFlowStore'
 import type { FlowStage } from '../stores/implementFlowStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
@@ -49,32 +50,23 @@ const workspaceStore = useWorkspaceStore()
 
 const columns = STAGE_COLUMNS
 
+const emit = defineEmits<{
+  'select-feature': [featureId: string]
+}>()
+
 function stageFeatures(stage: FlowStage) {
   return flowStore.featuresByStage[stage] || []
 }
 
-// Initialize or refresh from DAG
-async function initialize() {
-  const projectId = workspaceStore.activeProjectId
-  if (projectId) {
-    // Only re-fetch if store is empty or project changed
-    if (!flowStore.isActive || Object.keys(flowStore.features).length === 0) {
-      await flowStore.initializeFromDag(projectId)
-    }
-  }
+function onFeatureClick(featureId: string) {
+  emit('select-feature', featureId)
 }
 
-onMounted(() => {
-  initialize()
-})
-
-// Re-initialize only when the project ID actually changes (not on every property update)
-let lastProjectId: string | null = null
-watch(() => workspaceStore.activeProjectId, (newId) => {
-  if (newId && newId !== lastProjectId) {
-    lastProjectId = newId
-    flowStore.reset()
-    initialize()
+// Always fetch fresh data on mount (component uses v-if so this runs each time)
+onMounted(async () => {
+  const projectId = workspaceStore.activeProjectId
+  if (projectId) {
+    await flowStore.initializeFromDag(projectId)
   }
 })
 </script>

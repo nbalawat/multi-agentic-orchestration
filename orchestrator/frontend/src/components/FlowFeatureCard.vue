@@ -54,9 +54,10 @@ const depPct = computed(() =>
   border: 1px solid #21262d;
   border-left: 3px solid #8b949e;
   font-size: 11px;
+  cursor: pointer;
   transition: border-color 0.3s, background 0.3s;
 }
-.flow-card:hover { background: #1c2333; }
+.flow-card:hover { background: #1c2333; border-color: #30363d; }
 
 .stage-queued { border-left-color: #8b949e; }
 .stage-ready { border-left-color: #e3b341; }
