@@ -82,6 +82,12 @@
       :visible="store.commandInputVisible"
       @send="handleSendMessage"
     />
+
+    <!-- Onboard Project Modal -->
+    <OnboardProjectModal
+      :visible="showOnboardModal"
+      @close="showOnboardModal = false"
+    />
   </div>
 </template>
 
@@ -97,6 +103,7 @@ import ProjectContextBar from './components/ProjectContextBar.vue'
 import GlobalCommandInput from './components/GlobalCommandInput.vue'
 import ImplementationFlow from './components/ImplementationFlow.vue'
 import FlowFeatureModal from './components/FlowFeatureModal.vue'
+import OnboardProjectModal from './components/OnboardProjectModal.vue'
 import { useOrchestratorStore } from './stores/orchestratorStore'
 import { useWorkspaceStore } from './stores/workspaceStore'
 import { useImplementFlowStore } from './stores/implementFlowStore'
@@ -118,6 +125,7 @@ const isSidebarCollapsed = ref(false)
 // Center column tab: 'events' or 'flow'
 const centerView = ref<'events' | 'flow'>('events')
 const selectedFlowFeature = ref<any>(null)
+const showOnboardModal = ref(false)
 // Show flow tab only when active project is in implement phase
 const showFlowTab = computed(() => {
   const phase = workspaceStore.activeProject?.current_phase
@@ -182,8 +190,7 @@ const handleSelectProject = (projectId: string) => {
 }
 
 const handleOnboardProject = () => {
-  console.log('Onboard project clicked')
-  // TODO: Open onboarding modal
+  showOnboardModal.value = true
 }
 
 const handleFeatureSelect = (featureId: string) => {
