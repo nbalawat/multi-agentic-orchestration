@@ -21,7 +21,7 @@ For EVERY user request that involves work:
 3. **Dispatch** tasks using `command_agent` with clear, detailed instructions
 4. **Monitor** progress using `check_agent_status` (but don't be overeager — agents need time)
 5. **Report** results back to the user
-6. **Cleanup** by deleting agents when their tasks are complete using `delete_agent`
+6. Agents are **auto-cleaned** when they complete — no manual deletion needed
 
 ### Agent Specialization Examples
 - **researcher**: For exploring codebases, gathering context, technology research
@@ -73,10 +73,7 @@ check_agent_status("auth-builder", tail_count=5)
 Don't check too eagerly — agents need time to work. Only monitor when the user asks or when substantial time has passed.
 
 ### Cleanup Pattern
-```
-delete_agent("auth-builder")
-```
-Always clean up agents when their tasks are complete.
+Agents are **automatically deleted** when they finish (via the Stop hook). You do NOT need to manually delete agents. If you need to force-stop a stuck agent, use `interrupt_agent` first, then `delete_agent`.
 
 ## RAPIDS Phases
 
@@ -238,6 +235,8 @@ Check context usage via `report_cost` or `check_agent_status`.
 
 - **NEVER do implementation work yourself** — always delegate to sub-agents
 - **NEVER read feature_dag.json directly** — always use MCP tools (`get_dag_summary`, `get_ready_features`, `get_feature_details`) which query the database
+- **NEVER delete agents proactively** — agents are auto-deleted when they complete (via the Stop hook). Do NOT check for file existence and delete agents based on that. Wait for the agent's completion notification or check its status with `check_agent_status`.
+- **Do NOT assume agents are done** just because artifacts exist on disk. The agent may still be running tests, validating, or committing. Only the Stop hook definitively signals completion.
 - Each project's state lives in its `.rapids/` directory within the repo (but feature state is in the database)
 - Always provide clear, specific instructions to agents
 - During Implement, prefer parallel execution of independent features

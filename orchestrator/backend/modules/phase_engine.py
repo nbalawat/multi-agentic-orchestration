@@ -280,13 +280,17 @@ class PhaseEngine:
         return True
 
     def _check_feature_specs_exist(self) -> bool:
-        """Check that .rapids/features/ directory has spec files."""
-        features_dir = self._rapids_dir / 'features'
-        if not features_dir.exists():
-            return False
-        # Check for any files or subdirectories with content
-        items = list(features_dir.iterdir())
-        return len(items) > 0
+        """Check that feature spec files exist in .rapids/features/ or .rapids/plan/features/."""
+        # Check both locations — agents may write to either
+        for features_dir in [
+            self._rapids_dir / 'features',
+            self._rapids_dir / 'plan' / 'features',
+        ]:
+            if features_dir.exists():
+                items = list(features_dir.iterdir())
+                if len(items) > 0:
+                    return True
+        return False
 
     def _check_all_features_complete(self) -> bool:
         """Check that all features are complete.
