@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, watch, onActivated } from 'vue'
 import { useImplementFlowStore, STAGE_COLUMNS } from '../stores/implementFlowStore'
 import type { FlowStage } from '../stores/implementFlowStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
@@ -53,11 +53,14 @@ function stageFeatures(stage: FlowStage) {
   return flowStore.featuresByStage[stage] || []
 }
 
-// Initialize when the active project changes or on mount
+// Initialize or refresh from DAG
 async function initialize() {
   const projectId = workspaceStore.activeProjectId
   if (projectId) {
-    await flowStore.initializeFromDag(projectId)
+    // Only re-fetch if store is empty or project changed
+    if (!flowStore.isActive || flowStore.features.size === 0) {
+      await flowStore.initializeFromDag(projectId)
+    }
   }
 }
 
@@ -65,9 +68,14 @@ onMounted(() => {
   initialize()
 })
 
-watch(() => workspaceStore.activeProjectId, () => {
-  flowStore.reset()
-  initialize()
+// Re-initialize only when the project ID actually changes (not on every property update)
+let lastProjectId: string | null = null
+watch(() => workspaceStore.activeProjectId, (newId) => {
+  if (newId && newId !== lastProjectId) {
+    lastProjectId = newId
+    flowStore.reset()
+    initialize()
+  }
 })
 </script>
 

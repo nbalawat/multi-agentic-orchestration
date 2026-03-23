@@ -310,12 +310,26 @@ def create_stop_hook(
         context: Any
     ) -> Dict[str, Any]:
         """Stop hook implementation"""
-        reason = input_data.get("reason", "unknown")
+        raw_reason = input_data.get("reason", "")
         num_turns = input_data.get("num_turns", 0)
         duration_ms = input_data.get("duration_ms", 0)
 
+        # Map SDK stop reasons to user-friendly messages
+        reason_map = {
+            "end_turn": "completed",
+            "stop_sequence": "completed",
+            "max_tokens": "reached token limit",
+            "tool_use": "paused for tool use",
+            "": "completed",
+            "unknown": "completed",
+        }
+        reason = raw_reason or "completed"
+        display_reason = reason_map.get(reason, reason)
+        duration_sec = round(duration_ms / 1000, 1) if duration_ms else 0
+
         payload = {
             "reason": reason,
+            "display_reason": display_reason,
             "num_turns": num_turns,
             "duration_ms": duration_ms,
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -326,7 +340,7 @@ def create_stop_hook(
 
         logger.info(
             f"[Hook:Stop] Agent={agent_id} Task={task_slug} "
-            f"Entry={entry_index} Reason={reason} Turns={num_turns}"
+            f"Entry={entry_index} Reason={display_reason} Turns={num_turns} Duration={duration_sec}s"
         )
 
         # Insert hook event to database - THROW ERRORS LOUDLY
@@ -336,7 +350,7 @@ def create_stop_hook(
             entry_index=entry_index,
             event_type="Stop",
             payload=payload,
-            content=f"Agent stopped: {reason}"
+            content=f"Agent {display_reason} after {num_turns} turns ({duration_sec}s)"
         )
 
         # Broadcast via WebSocket
@@ -348,8 +362,8 @@ def create_stop_hook(
             "entry_index": entry_index,
             "event_category": "hook",
             "event_type": "Stop",
-            "content": f"Agent stopped: {reason}",
-            "summary": f"Stopped after {num_turns} turns",
+            "content": f"Agent {display_reason} after {num_turns} turns ({duration_sec}s)",
+            "summary": f"{display_reason} — {num_turns} turns, {duration_sec}s",
             "payload": payload,
             "timestamp": payload["timestamp"]
         })

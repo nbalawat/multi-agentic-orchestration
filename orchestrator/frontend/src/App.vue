@@ -87,6 +87,7 @@ import GlobalCommandInput from './components/GlobalCommandInput.vue'
 import ImplementationFlow from './components/ImplementationFlow.vue'
 import { useOrchestratorStore } from './stores/orchestratorStore'
 import { useWorkspaceStore } from './stores/workspaceStore'
+import { useImplementFlowStore } from './stores/implementFlowStore'
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts'
 
 // Use Pinia store
@@ -110,9 +111,25 @@ const showFlowTab = computed(() => {
 })
 
 // Auto-switch to flow view when entering implement phase
+const flowStore = useImplementFlowStore()
+
 watch(showFlowTab, (show) => {
-  if (show) centerView.value = 'flow'
-  else centerView.value = 'events'
+  if (show) {
+    centerView.value = 'flow'
+    // Ensure flow store is initialized when tab becomes visible
+    if (flowStore.features.size === 0 && workspaceStore.activeProjectId) {
+      flowStore.initializeFromDag(workspaceStore.activeProjectId)
+    }
+  } else {
+    centerView.value = 'events'
+  }
+})
+
+// Also re-initialize when user manually clicks the flow tab
+watch(centerView, (view) => {
+  if (view === 'flow' && flowStore.features.size === 0 && workspaceStore.activeProjectId) {
+    flowStore.initializeFromDag(workspaceStore.activeProjectId)
+  }
 })
 
 // Initialize store on mount

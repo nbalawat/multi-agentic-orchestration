@@ -1486,15 +1486,37 @@ class AgentManager:
                         except Exception as status_err:
                             self.logger.error(f"Failed to mark feature in_progress: {status_err}")
 
-                        # Dispatch the implementation task in background
-                        # command_agent takes agent_id (UUID), not agent_name
-                        # Use the command_agent_by_name helper which resolves name → id
+                        # Dispatch the implementation task
                         agent_id_for_dispatch = result.get("agent_id") if isinstance(result, dict) else None
-                        if agent_id_for_dispatch:
-                            asyncio.create_task(self.command_agent(
-                                agent_id=uuid.UUID(agent_id_for_dispatch),
-                                command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
-                            ))
+                        if not agent_id_for_dispatch:
+                            raise RuntimeError(f"Agent creation returned no agent_id: {result}")
+
+                        # Dispatch with error tracking — wrap in a task that logs failures
+                        async def _dispatch_and_track(aid, feature_entry):
+                            try:
+                                await self.command_agent(
+                                    agent_id=uuid.UUID(aid),
+                                    command=f"Implement the '{feature_entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
+                                )
+                            except Exception as dispatch_err:
+                                self.logger.error(f"Builder dispatch failed for '{feature_entry['feature']}': {dispatch_err}")
+                                # Roll back feature status
+                                try:
+                                    async with httpx.AsyncClient() as rb_client:
+                                        await rb_client.post(
+                                            f"{_API_BASE}/api/projects/{project_id}/dag/features/{feature_entry['feature_id']}/status",
+                                            json={"status": "planned"},
+                                            timeout=10.0,
+                                        )
+                                except Exception:
+                                    pass
+                                # Broadcast failure
+                                await self.ws_manager.broadcast({
+                                    "type": "feature_failed",
+                                    "data": {"project_id": project_id, "feature_id": feature_entry["feature_id"], "error": str(dispatch_err)}
+                                })
+
+                        asyncio.create_task(_dispatch_and_track(agent_id_for_dispatch, entry))
                         entry["status"] = "dispatched"
 
                         # Register builder for auto-merge on completion
@@ -2645,6 +2667,36 @@ class AgentManager:
             }
         })
 
+        # 3b. Send merge notification as a chat message so it's visible in the UI
+        from datetime import datetime, timezone
+        merge_icon = "✅" if merge_success else "❌"
+        merge_chat_msg = (
+            f"{merge_icon} **Feature Merged:** `{feature_name}`\n"
+            f"Branch: `{worktree_branch}` → main\n"
+            f"{merge_message}"
+        ) if merge_success else (
+            f"{merge_icon} **Merge Failed:** `{feature_name}`\n"
+            f"Branch: `{worktree_branch}`\n"
+            f"{merge_message}"
+        )
+        await self.ws_manager.broadcast({
+            "type": "orchestrator_chat",
+            "message": {
+                "id": str(uuid.uuid4()),
+                "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                "sender_type": "system",
+                "receiver_type": "user",
+                "message": merge_chat_msg,
+                "agent_id": None,
+                "metadata": {
+                    "event": "feature_merged" if merge_success else "feature_merge_failed",
+                    "feature_id": feature_id,
+                    "feature_name": feature_name,
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        })
+
         # 4. Clean up builder registry
         self._builder_registry.pop(agent_name, None)
 
@@ -2704,6 +2756,31 @@ class AgentManager:
                         }
                     })
 
+                    # Send wave transition chat notification
+                    ready_names = []
+                    for rid in ready_features:
+                        for f in dag_data.get("dag", {}).get("features", []):
+                            if f.get("id") == rid:
+                                ready_names.append(f.get("name", rid[:8]))
+                                break
+                    await self.ws_manager.broadcast({
+                        "type": "orchestrator_chat",
+                        "message": {
+                            "id": str(uuid.uuid4()),
+                            "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                            "sender_type": "system",
+                            "receiver_type": "user",
+                            "message": (
+                                f"🔄 **Wave Complete** — {completed}/{total} features done\n"
+                                f"Next up: {', '.join(ready_names[:5])}"
+                                + (f" and {len(ready_names) - 5} more" if len(ready_names) > 5 else "")
+                            ),
+                            "agent_id": None,
+                            "metadata": {"event": "wave_transition"},
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    })
+
                     # Notify the orchestrator to launch next wave
                     if self._on_agent_complete_callback:
                         wave_msg = (
@@ -2724,6 +2801,24 @@ class AgentManager:
                             "total": total,
                             "message": f"All {total} features implemented and merged!",
                         }
+                    })
+                    # Send completion chat notification
+                    await self.ws_manager.broadcast({
+                        "type": "orchestrator_chat",
+                        "message": {
+                            "id": str(uuid.uuid4()),
+                            "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                            "sender_type": "system",
+                            "receiver_type": "user",
+                            "message": (
+                                f"🎉 **Implementation Complete!**\n\n"
+                                f"All **{total}** features have been implemented and merged to main.\n"
+                                f"The project is ready to advance to the **Deploy** phase."
+                            ),
+                            "agent_id": None,
+                            "metadata": {"event": "dag_complete", "total": total},
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
                     })
 
             except Exception as e:
