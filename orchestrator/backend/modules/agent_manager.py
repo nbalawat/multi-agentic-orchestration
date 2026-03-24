@@ -2538,9 +2538,10 @@ class AgentManager:
             # Generate AI summary in background
             asyncio.create_task(self._summarize_and_update_prompt(prompt_id, command))
 
-            # Build hooks
+            # Build hooks — include cleanup hook so agent gets archived on completion
             hooks_dict = self._build_hooks_for_agent(
-                agent_id, agent.name, task_slug, entry_counter
+                agent_id, agent.name, task_slug, entry_counter,
+                include_cleanup=True,
             )
 
             # Default allowed tools - comprehensive set for general work
@@ -3024,22 +3025,28 @@ class AgentManager:
             if builder_info:
                 self.logger.info(f"[Cleanup] Found builder_info in memory registry for '{agent_name}'")
             else:
-                self.logger.info(f"[Cleanup] No memory registry entry, loading from DB...")
+                self.logger.info(f"[Cleanup] No memory registry entry, loading from DB for '{agent_name}' (id={agent_id})...")
                 try:
                     from .database import get_connection
                     async with get_connection() as conn:
+                        # Query by name (most recent) as fallback — agent_id may be stale
                         row = await conn.fetchrow(
                             "SELECT metadata FROM agents WHERE id = $1", agent_id
                         )
-                    if row:
+                        if not row:
+                            row = await conn.fetchrow(
+                                "SELECT metadata FROM agents WHERE name = $1 ORDER BY created_at DESC LIMIT 1",
+                                agent_name,
+                            )
+                    if row and row["metadata"]:
                         meta = row["metadata"]
                         if isinstance(meta, str):
                             meta = json.loads(meta)
                         if isinstance(meta, dict):
                             builder_info = meta.get("builder_info")
-                        self.logger.info(f"[Cleanup] DB metadata loaded, builder_info={'found' if builder_info else 'NOT found'}, meta keys={list(meta.keys()) if isinstance(meta, dict) else 'not a dict'}")
+                        self.logger.info(f"[Cleanup] DB metadata: builder_info={'FOUND' if builder_info else 'NOT found'}")
                     else:
-                        self.logger.warning(f"[Cleanup] No DB row found for agent_id={agent_id}")
+                        self.logger.warning(f"[Cleanup] No DB row found for agent '{agent_name}'")
                 except Exception as e:
                     self.logger.error(f"[Cleanup] DB metadata load FAILED: {e}")
 
@@ -3178,6 +3185,7 @@ class AgentManager:
         agent_name: str,
         task_slug: str,
         entry_counter: Dict[str, int],
+        include_cleanup: bool = False,
     ) -> Dict[str, Any]:
         """
         Build hooks dictionary for agent.
@@ -3258,8 +3266,7 @@ class AgentManager:
                             self.logger,
                             self.ws_manager,
                         ),
-                        self._create_cleanup_hook(agent_id, agent_name),
-                    ]
+                    ] + ([self._create_cleanup_hook(agent_id, agent_name)] if include_cleanup else [])
                 )
             ],
             "SubagentStop": [
