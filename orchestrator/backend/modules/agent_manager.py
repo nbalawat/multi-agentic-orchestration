@@ -1310,10 +1310,8 @@ class AgentManager:
             },
         )
         async def execute_ready_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Execute ready features via the ExecutionEngine."""
+            """Execute ready features — OLD proven pattern with execution_runs tracking."""
             try:
-                from .execution_engine import ExecutionEngine
-
                 project_id = args.get("project_id")
                 max_parallel = args.get("max_parallel", 3)
 
@@ -1323,17 +1321,194 @@ class AgentManager:
                         "is_error": True,
                     }
 
-                engine = ExecutionEngine(agent_manager=self, ws_manager=self.ws_manager)
-                result = await engine.execute_features(project_id, max_parallel)
+                # Get DAG
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
+                    data = resp.json()
 
-                lines = [f"Execution result: {result.get('message', '')}\n"]
-                for run in result.get("runs", []):
-                    status = "error" if "error" in run else "started"
-                    lines.append(f"  - {run['feature']}: {status}\n")
+                ready_feature_ids = data.get("ready_features", [])
+                dag_data = data.get("dag", {})
+                all_features = {f["id"]: f for f in dag_data.get("features", [])}
 
-                return {"content": [{"type": "text", "text": "".join(lines)}]}
-                # OLD CODE REMOVED — execution delegated to ExecutionEngine
-                pass  # dead code marker
+                if not ready_feature_ids:
+                    return {"content": [{"type": "text", "text": "No ready features to execute."}]}
+
+                # Filter features already running
+                active_feature_ids = {info["feature_id"] for info in self._builder_registry.values()}
+                ready_feature_ids = [fid for fid in ready_feature_ids if fid not in active_feature_ids]
+                ready_features = [all_features[fid] for fid in ready_feature_ids[:max_parallel] if fid in all_features]
+
+                if not ready_features:
+                    return {"content": [{"type": "text", "text": "All ready features already have agents."}]}
+
+                # Get project info
+                async with httpx.AsyncClient() as client:
+                    proj_resp = await client.get(f"{_API_BASE}/api/projects/{project_id}", timeout=15.0)
+                    proj_data = proj_resp.json()
+                project_info = proj_data.get("project", proj_data.get("data", {}))
+                project_name = project_info.get("name", "unknown")
+                repo_path = project_info.get("repo_path", ".")
+                archetype = project_info.get("archetype", "")
+
+                # Read spec
+                spec_content = ""
+                for sn in ["specification.md", "spec.md"]:
+                    sp = Path(repo_path) / ".rapids" / "plan" / sn
+                    if sp.exists():
+                        spec_content = sp.read_text()[:3000]
+                        break
+
+                # Read project context
+                from .project_context import ProjectContextManager
+                ctx_mgr = ProjectContextManager(repo_path, project_name)
+                project_context = ctx_mgr.get_context_for_prompt()
+
+                agents_created = []
+                for feature in ready_features:
+                    fid = feature.get("id", "")
+                    fname = feature.get("name", "unnamed")
+                    fdesc = feature.get("description", "")
+                    acceptance = feature.get("acceptance_criteria", [])
+                    acceptance_text = "\n".join(f"  - {c}" for c in acceptance) if isinstance(acceptance, list) else str(acceptance)
+                    agent_name = f"builder-{fname}"[:40]
+
+                    # Feature spec
+                    feature_spec = ""
+                    for spec_dir in [Path(repo_path) / ".rapids" / "plan" / "features" / fid, Path(repo_path) / ".rapids" / "plan" / "features" / fname]:
+                        sf = spec_dir / "spec.md"
+                        if sf.exists():
+                            feature_spec = sf.read_text()
+                            break
+
+                    prompt = (
+                        f"# Feature Builder — {fname}\n\n"
+                        f"Implement this feature for **{project_name}**.\n\n"
+                        f"**Name:** {fname}\n**Description:** {fdesc}\n\n"
+                        f"## Acceptance Criteria\n{acceptance_text}\n\n"
+                        f"## Working Directory\n`{repo_path}`\n\n"
+                    )
+                    if project_context:
+                        prompt += f"{project_context}\n\n"
+                    if spec_content:
+                        prompt += f"## Project Spec\n{spec_content}\n\n"
+                    if feature_spec:
+                        prompt += f"## Feature Spec\n{feature_spec}\n\n"
+                    prompt += "## Instructions\n1. Implement the feature\n2. Write tests\n3. Run tests\n4. Summarize what you did\n"
+
+                    agents_created.append({
+                        "agent": agent_name,
+                        "feature": fname,
+                        "feature_id": fid,
+                        "prompt": prompt,
+                        "status": "queued",
+                    })
+
+                # Insert execution_runs for tracking
+                from .database import get_connection
+                import uuid as _uuid
+                pid = _uuid.UUID(project_id)
+                for entry in agents_created:
+                    try:
+                        fid_uuid = _uuid.UUID(entry["feature_id"]) if len(entry["feature_id"]) > 8 else None
+                        if fid_uuid:
+                            async with get_connection() as conn:
+                                await conn.execute(
+                                    "INSERT INTO execution_runs (id, project_id, feature_id, feature_name, agent_name, status) VALUES ($1, $2, $3, $4, $5, 'queued')",
+                                    _uuid.uuid4(), pid, fid_uuid, entry["feature"], entry["agent"],
+                                )
+                    except Exception:
+                        pass
+
+                # Launch builders concurrently (the OLD pattern that works)
+                async def _launch_builder(entry):
+                    try:
+                        # Check duplicate
+                        from .database import get_agent_by_name
+                        existing = await get_agent_by_name(self.orchestrator_agent_id, entry["agent"])
+                        if existing and not existing.archived:
+                            entry["status"] = "already_exists"
+                            return
+
+                        phase_meta = {"phase": "implement", "project_id": project_id, "archetype": archetype}
+
+                        result = await self.create_agent(
+                            name=entry["agent"],
+                            system_prompt=entry["prompt"],
+                            model=config.get_model_for_phase("implement"),
+                            phase_metadata=phase_meta,
+                        )
+                        entry["status"] = "created"
+
+                        # Mark feature in_progress
+                        try:
+                            async with httpx.AsyncClient() as sc:
+                                await sc.post(
+                                    f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
+                                    json={"status": "in_progress", "agent_name": entry["agent"]},
+                                    timeout=10.0,
+                                )
+                            # Update execution_run
+                            agent_id_str = result.get("agent_id") if isinstance(result, dict) else None
+                            if agent_id_str:
+                                async with get_connection() as conn:
+                                    await conn.execute(
+                                        "UPDATE execution_runs SET status = 'building', agent_id = $1, started_at = NOW() WHERE feature_name = $2 AND project_id = $3 AND status = 'queued'",
+                                        _uuid.UUID(agent_id_str), entry["feature"], pid,
+                                    )
+                            await self.ws_manager.broadcast({
+                                "type": "feature_started",
+                                "data": {"project_id": project_id, "feature_id": entry["feature_id"], "feature_name": entry["feature"], "agent_name": entry["agent"]}
+                            })
+                        except Exception as se:
+                            self.logger.error(f"[FeatureStatus] FAILED: {se}")
+
+                        # Dispatch
+                        agent_id_for_dispatch = result.get("agent_id") if isinstance(result, dict) else None
+                        if not agent_id_for_dispatch:
+                            raise RuntimeError(f"No agent_id: {result}")
+
+                        builder_info = {
+                            "feature_id": entry["feature_id"],
+                            "feature_name": entry["feature"],
+                            "project_id": project_id,
+                            "repo_path": repo_path,
+                        }
+                        self._builder_registry[entry["agent"]] = builder_info
+
+                        # Persist builder_info
+                        try:
+                            async with get_connection() as conn:
+                                await conn.execute(
+                                    "UPDATE agents SET metadata = metadata || $1::jsonb WHERE id = $2",
+                                    json.dumps({"builder_info": builder_info}),
+                                    _uuid.UUID(agent_id_for_dispatch),
+                                )
+                        except Exception:
+                            pass
+
+                        # Dispatch command in background
+                        asyncio.create_task(self._dispatch_and_track_v2(
+                            agent_id_for_dispatch, entry, project_id, pid, ctx_mgr,
+                        ))
+                        entry["status"] = "dispatched"
+
+                    except Exception as e:
+                        entry["status"] = f"error: {e}"
+                        self.logger.error(f"Builder launch failed: {entry['feature']}: {e}")
+                        try:
+                            async with httpx.AsyncClient() as rc:
+                                await rc.post(
+                                    f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
+                                    json={"status": "planned"}, timeout=10.0,
+                                )
+                        except Exception:
+                            pass
+
+                await asyncio.gather(*[_launch_builder(e) for e in agents_created])
+
+                lines = [f"Executing {len(ready_features)} features:\n"]
+                for a in agents_created:
+                    lines.append(f"  - {a['feature']} → {a['agent']} [{a['status']}]\n")
                 all_features = {f["id"]: f for f in dag_data.get("features", [])}
                 dag_status = data.get("dag_status", {})
 
@@ -2859,6 +3034,103 @@ class AgentManager:
 
             except Exception as e:
                 self.logger.error(f"[AutoMerge] Failed to check next wave: {e}")
+
+    async def _dispatch_and_track_v2(self, agent_id_str, entry, project_id, pid, ctx_mgr):
+        """Dispatch command_agent and handle completion with execution_runs tracking."""
+        import uuid as _uuid
+        from .database import get_connection, delete_agent, update_agent_status
+        from .rapids_database import update_feature_dag_status
+
+        agent_id = _uuid.UUID(agent_id_str)
+        error_message = None
+
+        try:
+            await self.command_agent(
+                agent_id=agent_id,
+                command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
+            )
+        except Exception as e:
+            error_message = str(e)
+            self.logger.error(f"[Dispatch] Failed: {entry['feature']}: {e}")
+
+        # Sequential cleanup
+        try:
+            # Get agent cost
+            async with get_connection() as conn:
+                agent_row = await conn.fetchrow("SELECT input_tokens, output_tokens, total_cost FROM agents WHERE id = $1", agent_id)
+            cost = dict(agent_row) if agent_row else {"input_tokens": 0, "output_tokens": 0, "total_cost": 0}
+
+            is_success = error_message is None
+            final_status = "complete" if is_success else "failed"
+
+            # Update execution_run
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE execution_runs SET status = $1, completed_at = NOW(), input_tokens = $2, output_tokens = $3, total_cost = $4, error_message = $5 WHERE feature_name = $6 AND project_id = $7 AND status = 'building'",
+                    final_status, cost.get("input_tokens", 0), cost.get("output_tokens", 0),
+                    float(cost.get("total_cost", 0)), error_message, entry["feature"], pid,
+                )
+
+            # Update feature
+            feat_status = "complete" if is_success else "blocked"
+            await update_feature_dag_status(pid, entry["feature_id"], feat_status, assigned_agent=entry["agent"])
+
+            # Archive agent
+            try:
+                await update_agent_status(agent_id, "completed")
+                await delete_agent(agent_id)
+            except Exception:
+                pass
+
+            # Update project context
+            if is_success and ctx_mgr:
+                try:
+                    ctx_mgr.update_after_feature(entry["feature"], entry["agent"], [])
+                except Exception:
+                    pass
+
+            # Broadcast
+            await self.ws_manager.broadcast({
+                "type": "feature_merged",
+                "data": {"project_id": project_id, "feature_id": entry["feature_id"], "feature_name": entry["feature"], "agent_name": entry["agent"], "success": is_success, "cost": float(cost.get("total_cost", 0))}
+            })
+            await self.ws_manager.broadcast({
+                "type": "agent_deleted",
+                "data": {"agent_id": agent_id_str, "agent_name": entry["agent"]}
+            })
+
+            # Chat notification
+            from datetime import datetime, timezone
+            icon = "✅" if is_success else "❌"
+            await self.ws_manager.broadcast({
+                "type": "orchestrator_chat",
+                "message": {
+                    "id": str(_uuid.uuid4()),
+                    "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                    "sender_type": "system", "receiver_type": "user",
+                    "message": f"{icon} **{entry['feature']}** — {final_status} | ${float(cost.get('total_cost', 0)):.3f}",
+                    "agent_id": None, "metadata": {"event": "feature_" + final_status},
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            })
+
+            # Check for next wave
+            dag = await FeatureDAG.from_database(project_id)
+            summary = dag.status_summary()
+            ready = dag.get_ready_features()
+            await self.ws_manager.broadcast({
+                "type": "dag_progress",
+                "data": {"project_id": project_id, "total": dag.feature_count, "completed": summary.get("complete", 0), "in_progress": summary.get("in_progress", 0), "ready": len(ready)}
+            })
+
+            if summary.get("complete", 0) == dag.feature_count and dag.feature_count > 0:
+                await self.ws_manager.broadcast({"type": "dag_complete", "data": {"project_id": project_id, "total": dag.feature_count}})
+
+            # Remove from registry
+            self._builder_registry.pop(entry["agent"], None)
+
+        except Exception as cleanup_err:
+            self.logger.error(f"[Dispatch] Cleanup failed: {entry['feature']}: {cleanup_err}", exc_info=True)
 
     def _create_feature_tools(self, project_id: str) -> List:
         """Create feature management MCP tools scoped to a specific project.
