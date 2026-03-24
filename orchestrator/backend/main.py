@@ -244,7 +244,25 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Could not restore project context: {e}")
 
-    # 2. Recover agents from previous session (across all orchestrators for this workspace)
+    # 2. Adopt orphaned agents from previous orchestrators
+    try:
+        async with database.get_connection() as conn:
+            adopted = await conn.execute(
+                """
+                UPDATE agents SET orchestrator_agent_id = $1
+                WHERE archived = false
+                AND status NOT IN ('completed', 'complete')
+                AND orchestrator_agent_id != $1
+                """,
+                orchestrator.id,
+            )
+            count = int(adopted.split()[-1]) if adopted else 0
+            if count > 0:
+                logger.info(f"✅ Adopted {count} orphaned agent(s) from previous orchestrators")
+    except Exception as e:
+        logger.warning(f"Could not adopt orphaned agents: {e}")
+
+    # 3. Recover agents from previous session
     recovered_agents = await agent_manager.load_persisted_agents()
     if recovered_agents:
         logger.info(f"✅ Recovered {len(recovered_agents)} agent(s) from previous session")
