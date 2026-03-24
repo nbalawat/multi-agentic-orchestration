@@ -127,7 +127,11 @@ async def execute_single_run(pool, run: Dict[str, Any]):
     repo_path = run["repo_path"]
     archetype = run.get("archetype", "")
 
-    logger.info(f"[{feature_name}] Starting execution...")
+    # Append short ID to agent name to avoid duplicate key conflicts
+    short_id = str(uuid.uuid4())[:6]
+    agent_name = f"{agent_name}-{short_id}"
+
+    logger.info(f"[{feature_name}] Starting execution (agent: {agent_name})...")
 
     # 1. Mark as building
     async with pool.acquire() as conn:
@@ -160,8 +164,13 @@ async def execute_single_run(pool, run: Dict[str, Any]):
         pass  # Non-critical
 
     # 3b. Register agent in agents table so it appears in the sidebar
+    # Archive any existing agent with the same name first (from previous runs)
     agent_id = uuid.uuid4()
     async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agents SET archived = true WHERE name = $1 AND archived = false",
+            agent_name,
+        )
         await conn.execute(
             """
             INSERT INTO agents (id, orchestrator_agent_id, name, model, system_prompt, status, working_dir, metadata, created_at, updated_at)
