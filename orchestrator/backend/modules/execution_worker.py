@@ -337,6 +337,20 @@ async def run_sdk_session(prompt: str, cwd: str, feature_name: str, run_meta: Di
                     cost_data["input_tokens"] = getattr(usage, "input_tokens", 0) or 0
                     cost_data["output_tokens"] = getattr(usage, "output_tokens", 0) or 0
 
+                # Update agent cost in real-time so sidebar shows progress
+                try:
+                    import httpx as _httpx
+                    async with _httpx.AsyncClient() as _client:
+                        await _client.post(f"{backend_url}/api/worker/feature-event", json={
+                            "type": "agent_cost_update",
+                            "agent_name": agent_name,
+                            "input_tokens": cost_data["input_tokens"],
+                            "output_tokens": cost_data["output_tokens"],
+                            "total_cost": cost_data["total_cost"],
+                        }, timeout=3.0)
+                except Exception:
+                    pass
+
     return cost_data
 
 

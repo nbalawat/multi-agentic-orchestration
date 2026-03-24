@@ -1493,7 +1493,28 @@ async def worker_feature_event(request: Request):
         data = await request.json()
         event_type = data.get("type", "")
 
-        if event_type == "agent_created":
+        if event_type == "agent_cost_update":
+            # Update agent tokens/cost in DB + broadcast to frontend
+            agent_name = data.get("agent_name", "")
+            try:
+                async with database.get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE agents SET input_tokens = $1, output_tokens = $2, total_cost = $3, updated_at = NOW() WHERE name = $4 AND archived = false",
+                        data.get("input_tokens", 0), data.get("output_tokens", 0),
+                        float(data.get("total_cost", 0)), agent_name,
+                    )
+                await ws_manager.broadcast({
+                    "type": "agent_updated",
+                    "agent": {
+                        "name": agent_name,
+                        "input_tokens": data.get("input_tokens", 0),
+                        "output_tokens": data.get("output_tokens", 0),
+                        "total_cost": data.get("total_cost", 0),
+                    }
+                })
+            except Exception as e:
+                logger.error(f"Agent cost update failed: {e}")
+        elif event_type == "agent_created":
             # Trigger frontend to reload agent list
             await ws_manager.broadcast({"type": "agent_created", "agent": data})
         elif event_type == "agent_log":
