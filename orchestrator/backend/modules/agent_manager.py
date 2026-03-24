@@ -3004,12 +3004,13 @@ class AgentManager:
         return [create_features_tool, list_features_tool, validate_dag_tool, delete_feature_tool]
 
     def _create_cleanup_hook(self, agent_id: uuid.UUID, agent_name: str):
-        """Create a Stop hook that auto-archives the agent after completion.
+        """Create a Stop hook that handles ALL post-completion work.
 
-        This runs after the standard stop hook (logging). It:
-        1. Marks the agent as completed in the DB
-        2. Archives (soft-deletes) the agent
-        3. Broadcasts the deletion to the frontend
+        This is the SINGLE definitive cleanup point. When an agent stops:
+        1. Mark the agent as completed + archive it
+        2. For builders: mark the feature as complete in the DB
+        3. For builders: trigger auto-merge if worktree exists
+        4. Broadcast all events to frontend
         """
         async def cleanup_hook(
             input_data: Dict[str, Any],
@@ -3017,12 +3018,12 @@ class AgentManager:
             context: Any,
         ) -> Dict[str, Any]:
             try:
-                # Mark completed and archive
+                # 1. Mark completed and archive agent
                 await update_agent_status(agent_id, "completed")
                 await delete_agent(agent_id)
                 self.logger.info(f"[Cleanup] Agent '{agent_name}' archived after stop")
 
-                # Broadcast to frontend
+                # Broadcast agent removal
                 await self.ws_manager.broadcast_agent_status_change(
                     str(agent_id), "executing", "completed"
                 )
@@ -3030,6 +3031,124 @@ class AgentManager:
                     "type": "agent_deleted",
                     "data": {"agent_id": str(agent_id), "agent_name": agent_name},
                 })
+
+                # 2. For builder agents: mark feature complete + auto-merge
+                builder_info = self._builder_registry.pop(agent_name, None)
+
+                # If not in memory registry, try to load from agent metadata
+                if not builder_info:
+                    try:
+                        from .database import get_connection
+                        async with get_connection() as conn:
+                            row = await conn.fetchrow(
+                                "SELECT metadata FROM agents WHERE id = $1",
+                                agent_id,
+                            )
+                            if row and row["metadata"]:
+                                meta = row["metadata"]
+                                if isinstance(meta, str):
+                                    meta = json.loads(meta)
+                                builder_info = meta.get("builder_info")
+                    except Exception:
+                        pass
+
+                if builder_info:
+                    feature_id = builder_info.get("feature_id", "")
+                    feature_name = builder_info.get("feature_name", "")
+                    project_id = builder_info.get("project_id", "")
+
+                    self.logger.info(f"[Cleanup] Builder '{agent_name}' completed feature '{feature_name}'")
+
+                    # Mark feature as complete in DB
+                    try:
+                        from .rapids_database import update_feature_dag_status
+                        await update_feature_dag_status(
+                            uuid.UUID(project_id), feature_id, "complete",
+                            assigned_agent=agent_name,
+                        )
+                        self.logger.info(f"[Cleanup] Feature '{feature_name}' marked complete in DB")
+                    except Exception as feat_err:
+                        self.logger.error(f"[Cleanup] Failed to mark feature complete: {feat_err}")
+
+                    # Broadcast feature merged
+                    await self.ws_manager.broadcast({
+                        "type": "feature_merged",
+                        "data": {
+                            "project_id": project_id,
+                            "feature_id": feature_id,
+                            "feature_name": feature_name,
+                            "agent_name": agent_name,
+                            "success": True,
+                            "message": f"Feature '{feature_name}' completed by {agent_name}",
+                        }
+                    })
+
+                    # Broadcast merge chat notification
+                    from datetime import datetime, timezone
+                    await self.ws_manager.broadcast({
+                        "type": "orchestrator_chat",
+                        "message": {
+                            "id": str(uuid.uuid4()),
+                            "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                            "sender_type": "system",
+                            "receiver_type": "user",
+                            "message": f"✅ **Feature Complete:** `{feature_name}` — by {agent_name}",
+                            "agent_id": None,
+                            "metadata": {"event": "feature_merged", "feature_id": feature_id},
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    })
+
+                    # Check DAG progress and broadcast
+                    try:
+                        dag = await FeatureDAG.from_database(project_id)
+                        summary = dag.status_summary()
+                        total = dag.feature_count
+                        completed = summary.get("complete", 0)
+                        ready = dag.get_ready_features()
+
+                        await self.ws_manager.broadcast({
+                            "type": "dag_progress",
+                            "data": {
+                                "project_id": project_id,
+                                "total": total,
+                                "completed": completed,
+                                "in_progress": summary.get("in_progress", 0),
+                                "ready": len(ready),
+                            }
+                        })
+
+                        if completed == total and total > 0:
+                            await self.ws_manager.broadcast({
+                                "type": "dag_complete",
+                                "data": {"project_id": project_id, "total": total},
+                            })
+                            await self.ws_manager.broadcast({
+                                "type": "orchestrator_chat",
+                                "message": {
+                                    "id": str(uuid.uuid4()),
+                                    "orchestrator_agent_id": str(self.orchestrator_agent_id),
+                                    "sender_type": "system",
+                                    "receiver_type": "user",
+                                    "message": f"🎉 **All {total} features complete!** Ready to advance to Deploy.",
+                                    "agent_id": None,
+                                    "metadata": {"event": "dag_complete"},
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                },
+                            })
+                        elif ready:
+                            await self.ws_manager.broadcast({
+                                "type": "wave_transition",
+                                "data": {
+                                    "project_id": project_id,
+                                    "next_features": ready,
+                                    "total": total,
+                                    "completed": completed,
+                                },
+                            })
+                    except Exception as dag_err:
+                        self.logger.error(f"[Cleanup] DAG progress check failed: {dag_err}")
+
             except Exception as e:
                 self.logger.warning(f"[Cleanup] Failed to clean up agent '{agent_name}': {e}")
             return {}
