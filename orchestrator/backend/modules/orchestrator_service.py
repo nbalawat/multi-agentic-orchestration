@@ -457,10 +457,12 @@ class OrchestratorService:
             )
 
         # Build options with management tools if available
-        # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
+        # Pass auth credentials to ensure subprocess has access
         env_vars = {}
         if "ANTHROPIC_API_KEY" in os.environ:
             env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+        if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
+            env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
         options_dict = {
             "system_prompt": self._load_system_prompt(),

@@ -1512,32 +1512,28 @@ class AgentManager:
                         if not agent_id_for_dispatch:
                             raise RuntimeError(f"Agent creation returned no agent_id: {result}")
 
-                        # Dispatch with error tracking — wrap in a task that logs failures
-                        async def _dispatch_and_track(aid, feature_entry):
+                        # Dispatch directly — don't use create_task (it may never run)
+                        self.logger.info(f"[Dispatch] Dispatching command to builder '{entry['agent']}'...")
+                        try:
+                            dispatch_task = asyncio.create_task(self.command_agent(
+                                agent_id=uuid.UUID(agent_id_for_dispatch),
+                                command=f"Implement the '{entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
+                            ))
+                            # Store the task so it doesn't get garbage collected
+                            entry["_dispatch_task"] = dispatch_task
+                            self.logger.info(f"[Dispatch] Task created for builder '{entry['agent']}'")
+                        except Exception as dispatch_err:
+                            self.logger.error(f"[Dispatch] Failed for '{entry['feature']}': {dispatch_err}")
+                            # Roll back feature status
                             try:
-                                await self.command_agent(
-                                    agent_id=uuid.UUID(aid),
-                                    command=f"Implement the '{feature_entry['feature']}' feature. Follow the spec and acceptance criteria. Run tests when done.",
-                                )
-                            except Exception as dispatch_err:
-                                self.logger.error(f"Builder dispatch failed for '{feature_entry['feature']}': {dispatch_err}")
-                                # Roll back feature status
-                                try:
-                                    async with httpx.AsyncClient() as rb_client:
-                                        await rb_client.post(
-                                            f"{_API_BASE}/api/projects/{project_id}/dag/features/{feature_entry['feature_id']}/status",
-                                            json={"status": "planned"},
-                                            timeout=10.0,
-                                        )
-                                except Exception:
-                                    pass
-                                # Broadcast failure
-                                await self.ws_manager.broadcast({
-                                    "type": "feature_failed",
-                                    "data": {"project_id": project_id, "feature_id": feature_entry["feature_id"], "error": str(dispatch_err)}
-                                })
-
-                        asyncio.create_task(_dispatch_and_track(agent_id_for_dispatch, entry))
+                                async with httpx.AsyncClient() as rb_client:
+                                    await rb_client.post(
+                                        f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
+                                        json={"status": "planned"},
+                                        timeout=10.0,
+                                    )
+                            except Exception:
+                                pass
                         entry["status"] = "dispatched"
 
                         # Register builder for auto-merge on completion
@@ -2406,10 +2402,12 @@ class AgentManager:
 
             default_disallowed = ["NotebookEdit", "ExitPlanMode"]
 
-            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
+            # Pass auth credentials to ensure subprocess has access
             env_vars = {}
             if "ANTHROPIC_API_KEY" in os.environ:
                 env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+            if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
+                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
             # Only add can_use_tool for interactive agents (not builder agents)
             # Builder agents (name starts with "builder-") run autonomously
@@ -2566,10 +2564,12 @@ class AgentManager:
 
             default_disallowed = ["NotebookEdit", "ExitPlanMode"]
 
-            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
+            # Pass auth credentials to ensure subprocess has access
             env_vars = {}
             if "ANTHROPIC_API_KEY" in os.environ:
                 env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+            if "CLAUDE_CODE_OAUTH_TOKEN" in os.environ:
+                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 
             # Build options with session resume (use Pydantic model properties)
             options = ClaudeAgentOptions(
@@ -3018,7 +3018,29 @@ class AgentManager:
             context: Any,
         ) -> Dict[str, Any]:
             try:
-                # 1. Mark completed and archive agent
+                # 1. Load builder_info BEFORE archiving (archived agents can't be queried)
+                builder_info = self._builder_registry.pop(agent_name, None)
+
+                # If not in memory registry, load from agent metadata (while still accessible)
+                if not builder_info:
+                    try:
+                        from .database import get_connection
+                        async with get_connection() as conn:
+                            row = await conn.fetchrow(
+                                "SELECT metadata FROM agents WHERE id = $1",
+                                agent_id,
+                            )
+                            if row and row["metadata"]:
+                                meta = row["metadata"]
+                                if isinstance(meta, str):
+                                    meta = json.loads(meta)
+                                builder_info = meta.get("builder_info")
+                                if builder_info:
+                                    self.logger.info(f"[Cleanup] Loaded builder_info from DB metadata for '{agent_name}'")
+                    except Exception as meta_err:
+                        self.logger.warning(f"[Cleanup] Could not load metadata: {meta_err}")
+
+                # 2. Archive the agent
                 await update_agent_status(agent_id, "completed")
                 await delete_agent(agent_id)
                 self.logger.info(f"[Cleanup] Agent '{agent_name}' archived after stop")
@@ -3032,10 +3054,7 @@ class AgentManager:
                     "data": {"agent_id": str(agent_id), "agent_name": agent_name},
                 })
 
-                # 2. For builder agents: mark feature complete + auto-merge
-                builder_info = self._builder_registry.pop(agent_name, None)
-
-                # If not in memory registry, try to load from agent metadata
+                # 3. For builder agents: mark feature complete
                 if not builder_info:
                     try:
                         from .database import get_connection
