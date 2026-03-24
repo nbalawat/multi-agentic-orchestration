@@ -39,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch, toRef } from 'vue'
+import { onMounted, onUnmounted, watch, ref } from 'vue'
 import { useImplementFlowStore, STAGE_COLUMNS } from '../stores/implementFlowStore'
 import type { FlowStage } from '../stores/implementFlowStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
@@ -74,10 +74,25 @@ async function loadData() {
   }
 }
 
-// Load on mount
-onMounted(() => { loadData() })
+// Load on mount + auto-refresh every 5 seconds while visible
+const refreshInterval = ref<ReturnType<typeof setInterval> | null>(null)
 
-// Re-load every time the panel becomes visible
+onMounted(() => {
+  loadData()
+  refreshInterval.value = setInterval(() => {
+    if (props.visible !== false) {
+      loadData()
+    }
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (refreshInterval.value) {
+    clearInterval(refreshInterval.value)
+  }
+})
+
+// Also re-load when panel becomes visible
 watch(() => props.visible, (isVisible) => {
   if (isVisible) { loadData() }
 })
