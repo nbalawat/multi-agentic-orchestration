@@ -1490,11 +1490,12 @@ class AgentManager:
                         # Mark feature in_progress ONLY after agent creation succeeds
                         try:
                             async with httpx.AsyncClient() as status_client:
-                                await status_client.post(
+                                resp = await status_client.post(
                                     f"{_API_BASE}/api/projects/{project_id}/dag/features/{entry['feature_id']}/status",
                                     json={"status": "in_progress", "agent_name": entry["agent"]},
                                     timeout=10.0,
                                 )
+                                self.logger.info(f"[FeatureStatus] {entry['feature']} → in_progress (HTTP {resp.status_code})")
                             await self.ws_manager.broadcast({
                                 "type": "feature_started",
                                 "data": {
@@ -1505,7 +1506,7 @@ class AgentManager:
                                 }
                             })
                         except Exception as status_err:
-                            self.logger.error(f"Failed to mark feature in_progress: {status_err}")
+                            self.logger.error(f"[FeatureStatus] FAILED to mark '{entry['feature']}' in_progress: {status_err}")
 
                         # Dispatch the implementation task
                         agent_id_for_dispatch = result.get("agent_id") if isinstance(result, dict) else None
@@ -1557,8 +1558,9 @@ class AgentManager:
                                     json.dumps({"builder_info": builder_info}),
                                     uuid.UUID(agent_id_for_dispatch),
                                 )
-                        except Exception:
-                            pass  # Non-critical — in-memory registry is primary
+                            self.logger.info(f"[BuilderInfo] Persisted to agent metadata for '{entry['agent']}'")
+                        except Exception as persist_err:
+                            self.logger.error(f"[BuilderInfo] Failed to persist for '{entry['agent']}': {persist_err}")
 
                     except Exception as e:
                         entry["status"] = f"error: {str(e)}"
