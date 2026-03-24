@@ -1310,7 +1310,7 @@ class AgentManager:
             },
         )
         async def execute_ready_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Execute ready features — OLD proven pattern with execution_runs tracking."""
+            """Queue ready features for execution by the worker process."""
             try:
                 project_id = args.get("project_id")
                 max_parallel = args.get("max_parallel", 3)
@@ -1320,6 +1320,55 @@ class AgentManager:
                         "content": [{"type": "text", "text": "Error: 'project_id' is required"}],
                         "is_error": True,
                     }
+
+                # Get ready features from DAG
+                dag = await FeatureDAG.from_database(project_id)
+                ready_ids = dag.get_ready_features()
+
+                if not ready_ids:
+                    s = dag.status_summary()
+                    return {"content": [{"type": "text", "text": f"No ready features. {s.get('complete',0)}/{dag.feature_count} complete."}]}
+
+                # Filter already queued/building
+                from .database import get_connection
+                import uuid as _uuid
+                pid = _uuid.UUID(project_id)
+                async with get_connection() as conn:
+                    active = await conn.fetch(
+                        "SELECT feature_id::text FROM execution_runs WHERE project_id = $1 AND status IN ('queued', 'building', 'testing')",
+                        pid,
+                    )
+                active_fids = {r["feature_id"] for r in active}
+                ready_ids = [fid for fid in ready_ids if fid not in active_fids][:max_parallel]
+
+                if not ready_ids:
+                    return {"content": [{"type": "text", "text": "All ready features already queued or building."}]}
+
+                # Insert execution_runs — the worker process will pick them up
+                queued = []
+                for fid in ready_ids:
+                    feat = dag._features.get(fid)
+                    if not feat:
+                        continue
+                    agent_name = f"builder-{feat.name}"[:40]
+                    try:
+                        async with get_connection() as conn:
+                            await conn.execute(
+                                "INSERT INTO execution_runs (id, project_id, feature_id, feature_name, agent_name, status) VALUES ($1, $2, $3, $4, $5, 'queued')",
+                                _uuid.uuid4(), pid, _uuid.UUID(fid), feat.name, agent_name,
+                            )
+                            # Notify worker via LISTEN/NOTIFY
+                            await conn.execute("NOTIFY feature_queue, $1", fid)
+                        queued.append(feat.name)
+                    except Exception as e:
+                        self.logger.error(f"Failed to queue '{feat.name}': {e}")
+
+                lines = [f"Queued {len(queued)} features for execution:\n"]
+                for name in queued:
+                    lines.append(f"  - {name}\n")
+                lines.append("\nThe execution worker will pick these up and start building.")
+
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
 
                 # Get DAG
                 async with httpx.AsyncClient() as client:

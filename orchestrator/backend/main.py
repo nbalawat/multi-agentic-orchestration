@@ -1486,6 +1486,69 @@ async def list_project_features(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/worker/feature-event")
+async def worker_feature_event(request: Request):
+    """Webhook called by execution_worker to broadcast events to frontend."""
+    try:
+        data = await request.json()
+        event_type = data.get("type", "")
+
+        if event_type == "agent_created":
+            # Trigger frontend to reload agent list
+            await ws_manager.broadcast({"type": "agent_created", "agent": data})
+        elif event_type == "agent_log":
+            # Stream agent activity to event stream
+            await ws_manager.broadcast_agent_log({
+                "id": str(uuid.uuid4()),
+                "agent_id": data.get("agent_id", ""),
+                "agent_name": data.get("agent_name", ""),
+                "task_slug": data.get("feature_name", ""),
+                "entry_index": data.get("entry_index", 0),
+                "event_category": data.get("event_category", "response"),
+                "event_type": data.get("event_type", "text"),
+                "content": data.get("content", ""),
+                "summary": data.get("content", "")[:100],
+                "payload": {},
+                "timestamp": datetime.now().isoformat(),
+            })
+        elif event_type == "feature_started":
+            await ws_manager.broadcast({"type": "feature_started", "data": data})
+        elif event_type == "feature_completed":
+            await ws_manager.broadcast({"type": "feature_merged", "data": data})
+            # Agent is now archived — broadcast deletion
+            await ws_manager.broadcast({"type": "agent_deleted", "data": {"agent_name": data.get("agent_name", "")}})
+            # Chat notification
+            icon = "✅" if data.get("status") == "complete" else "❌"
+            cost = data.get("cost", 0)
+            await ws_manager.broadcast({
+                "type": "orchestrator_chat",
+                "message": {
+                    "id": str(uuid.uuid4()),
+                    "orchestrator_agent_id": str(app.state.orchestrator.id),
+                    "sender_type": "system", "receiver_type": "user",
+                    "message": f"{icon} **{data.get('feature_name', '?')}** — {data.get('status', '?')} | ${cost:.3f}",
+                    "agent_id": None,
+                    "metadata": {"event": event_type},
+                    "timestamp": datetime.now().isoformat(),
+                },
+            })
+            # Broadcast DAG progress
+            try:
+                dag = await FeatureDAG.from_database(data.get("project_id", ""))
+                s = dag.status_summary()
+                await ws_manager.broadcast({
+                    "type": "dag_progress",
+                    "data": {"project_id": data.get("project_id"), "total": dag.feature_count, "completed": s.get("complete", 0), "in_progress": s.get("in_progress", 0)}
+                })
+            except Exception:
+                pass
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Worker event error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @app.get("/api/projects/{project_id}/execution-status")
 async def get_execution_status(project_id: str):
     """Get execution status for the Implementation Flow board — single endpoint."""
