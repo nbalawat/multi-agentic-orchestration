@@ -88,10 +88,23 @@ async def process_queued_runs(pool):
     if not rows:
         return
 
-    logger.info(f"Found {len(rows)} queued run(s)")
+    # Check how many are already building
+    async with pool.acquire() as conn:
+        building_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM execution_runs WHERE status = 'building'"
+        )
 
-    for row in rows:
-        run = dict(row)
+    max_parallel = int(os.environ.get("MAX_PARALLEL_BUILDERS", "3"))
+    slots_available = max(0, max_parallel - building_count)
+
+    if slots_available == 0:
+        return
+
+    runs_to_start = [dict(row) for row in rows[:slots_available]]
+    logger.info(f"Found {len(rows)} queued, starting {len(runs_to_start)} (slots: {slots_available}/{max_parallel})")
+
+    # Start them concurrently
+    async def safe_execute(run):
         try:
             await execute_single_run(pool, run)
         except Exception as e:
@@ -101,6 +114,8 @@ async def process_queued_runs(pool):
                     "UPDATE execution_runs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2",
                     str(e), run["id"],
                 )
+
+    await asyncio.gather(*[safe_execute(r) for r in runs_to_start])
 
 
 async def execute_single_run(pool, run: Dict[str, Any]):
