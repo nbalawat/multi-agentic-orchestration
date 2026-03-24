@@ -1,49 +1,80 @@
 <template>
-  <div class="flow-card" :class="[`stage-${feature.stage}`, { 'on-critical-path': feature.isOnCriticalPath }]">
+  <div class="flow-card" :class="[`stage-${run.status}`]">
     <div class="card-header">
-      <span class="feature-name" :title="feature.name">{{ feature.name }}</span>
-      <span class="wave-badge">W{{ feature.waveNumber }}</span>
+      <span class="feature-name" :title="run.feature_name">{{ run.feature_name }}</span>
+      <span class="wave-badge">W{{ run.wave_number }}</span>
     </div>
 
-    <div class="card-meta">
-      <span v-if="feature.assignedAgent" class="agent-badge" :class="{ pulsing: feature.stage === 'building' }">
+    <div class="card-meta" v-if="run.agent_name">
+      <span class="agent-badge" :class="{ pulsing: run.status === 'building' }">
         <span class="agent-dot"></span>
-        {{ feature.assignedAgent }}
+        {{ run.agent_name }}
       </span>
-      <span class="priority-badge" :class="`p${Math.min(feature.priority, 3)}`">P{{ feature.priority }}</span>
     </div>
 
     <div class="card-footer">
-      <span class="dep-indicator" v-if="feature.totalDeps > 0">
-        <span class="dep-fill" :style="{ width: depPct + '%' }"></span>
-        {{ feature.satisfiedDeps }}/{{ feature.totalDeps }} deps
+      <span class="cost-badge" v-if="run.cost > 0">${{ run.cost.toFixed(3) }}</span>
+      <span class="test-badge" v-if="hasTestResults" :class="testClass">
+        {{ testLabel }}
       </span>
-      <span v-else class="dep-indicator no-deps">no deps</span>
-      <span class="elapsed" v-if="elapsed">{{ elapsed }}</span>
+      <span class="elapsed" v-if="run.started_at && !run.completed_at">{{ elapsed }}</span>
+      <span class="elapsed" v-if="run.completed_at">{{ duration }}</span>
     </div>
 
-    <div v-if="feature.mergeStatus === 'failed'" class="merge-error">merge conflict</div>
+    <div v-if="run.error_message" class="error-line" :title="run.error_message">{{ run.error_message.substring(0, 60) }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { FlowFeature } from '../stores/implementFlowStore'
-import { useElapsedTime } from '../composables/useElapsedTime'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
+import type { ExecutionRun } from '../stores/implementFlowStore'
 
-const props = defineProps<{ feature: FlowFeature }>()
-const { formatElapsed } = useElapsedTime()
+const props = defineProps<{ run: ExecutionRun }>()
+
+// Elapsed time ticker
+const now = ref(Date.now())
+let timer: ReturnType<typeof setInterval> | null = null
+onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 1000) })
+onUnmounted(() => { if (timer) clearInterval(timer) })
 
 const elapsed = computed(() => {
-  if (props.feature.stage === 'done' || props.feature.stage === 'queued') return ''
-  return formatElapsed(props.feature.stageEnteredAt)
+  if (!props.run.started_at) return ''
+  const ms = now.value - new Date(props.run.started_at).getTime()
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
 })
 
-const depPct = computed(() =>
-  props.feature.totalDeps > 0
-    ? Math.round((props.feature.satisfiedDeps / props.feature.totalDeps) * 100)
-    : 0
-)
+const duration = computed(() => {
+  if (!props.run.started_at || !props.run.completed_at) return ''
+  const ms = new Date(props.run.completed_at).getTime() - new Date(props.run.started_at).getTime()
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s`
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
+})
+
+const hasTestResults = computed(() => {
+  const t = props.run.test_results
+  return t && (t.passed || t.failed || t.errors?.length)
+})
+
+const testClass = computed(() => {
+  const t = props.run.test_results
+  if (t?.failed && t.failed > 0) return 'test-fail'
+  if (t?.passed && t.passed > 0) return 'test-pass'
+  if (t?.errors?.length) return 'test-fail'
+  return 'test-none'
+})
+
+const testLabel = computed(() => {
+  const t = props.run.test_results
+  if (t?.failed && t.failed > 0) return `${t.passed || 0}/${(t.passed || 0) + t.failed} passed`
+  if (t?.passed && t.passed > 0) return `${t.passed} passed`
+  if (t?.errors?.length) return `${t.errors.length} errors`
+  return ''
+})
 </script>
 
 <style scoped>
@@ -62,10 +93,9 @@ const depPct = computed(() =>
 .stage-queued { border-left-color: #8b949e; }
 .stage-ready { border-left-color: #e3b341; }
 .stage-building { border-left-color: #58a6ff; }
-.stage-merging { border-left-color: #bc8cff; }
-.stage-done { border-left-color: #86BC24; opacity: 0.8; }
-.stage-blocked { border-left-color: #f85149; }
-.on-critical-path { box-shadow: 0 0 0 1px rgba(134, 188, 36, 0.3); }
+.stage-testing { border-left-color: #bc8cff; }
+.stage-complete { border-left-color: #86BC24; opacity: 0.85; }
+.stage-failed { border-left-color: #f85149; }
 
 .card-header {
   display: flex;
@@ -95,9 +125,6 @@ const depPct = computed(() =>
 }
 
 .card-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
   margin-bottom: 4px;
 }
 
@@ -107,7 +134,7 @@ const depPct = computed(() =>
   gap: 4px;
   font-size: 10px;
   color: #58a6ff;
-  max-width: 120px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -130,52 +157,42 @@ const depPct = computed(() =>
   50% { opacity: 1; transform: scale(1.4); }
 }
 
-.priority-badge {
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-.p1 { background: rgba(248, 81, 73, 0.2); color: #f85149; }
-.p2 { background: rgba(227, 179, 65, 0.2); color: #e3b341; }
-.p3 { background: rgba(139, 148, 158, 0.2); color: #8b949e; }
-
 .card-footer {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
-.dep-indicator {
-  position: relative;
+.cost-badge {
   font-size: 9px;
-  color: #8b949e;
-  background: #21262d;
-  padding: 1px 6px;
-  border-radius: 3px;
-  overflow: hidden;
+  color: #e3b341;
+  font-variant-numeric: tabular-nums;
 }
 
-.dep-fill {
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  background: rgba(134, 188, 36, 0.15);
+.test-badge {
+  font-size: 9px;
+  padding: 1px 5px;
   border-radius: 3px;
-  transition: width 0.3s;
+  font-weight: 600;
 }
-
-.no-deps { color: #484f58; }
+.test-pass { background: rgba(134, 188, 36, 0.15); color: #86BC24; }
+.test-fail { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+.test-none { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
 
 .elapsed {
   font-size: 9px;
   color: #8b949e;
   font-variant-numeric: tabular-nums;
+  margin-left: auto;
 }
 
-.merge-error {
+.error-line {
   margin-top: 4px;
   font-size: 9px;
   color: #f85149;
-  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

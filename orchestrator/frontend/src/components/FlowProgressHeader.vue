@@ -6,16 +6,16 @@
       <span v-if="dagComplete" class="complete-badge">ALL COMPLETE</span>
     </div>
     <div class="progress-stats">
-      <span class="stat">{{ progress.completed }}/{{ progress.total }} features</span>
+      <span class="stat">{{ progress.complete }}/{{ progress.total }} features</span>
       <span class="stat-sep">|</span>
-      <span class="stat">Wave {{ progress.currentWave }}</span>
-      <span class="stat-sep">|</span>
-      <span class="stat">{{ progress.inProgress }} building</span>
+      <span class="stat">{{ progress.in_progress }} building</span>
+      <span class="stat-sep" v-if="totalCost > 0">|</span>
+      <span class="stat cost" v-if="totalCost > 0">${{ totalCost.toFixed(3) }}</span>
     </div>
     <div class="progress-bar-track">
       <div
         class="progress-bar-fill"
-        :style="{ width: progress.completionPct + '%' }"
+        :style="{ width: progress.completion_pct + '%' }"
         :class="{ complete: dagComplete }"
       ></div>
     </div>
@@ -23,11 +23,12 @@
 </template>
 
 <script setup lang="ts">
-import type { FlowProgress } from '../stores/implementFlowStore'
+import type { DagSummary } from '../stores/implementFlowStore'
 
 defineProps<{
-  progress: FlowProgress
+  progress: DagSummary
   dagComplete: boolean
+  totalCost?: number
   projectName?: string
 }>()
 </script>
@@ -84,6 +85,7 @@ defineProps<{
 }
 
 .stat-sep { color: #484f58; }
+.stat.cost { color: #e3b341; }
 
 .progress-bar-track {
   height: 4px;

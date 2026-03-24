@@ -1486,6 +1486,22 @@ async def list_project_features(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/projects/{project_id}/execution-status")
+async def get_execution_status(project_id: str):
+    """Get execution status for the Implementation Flow board — single endpoint."""
+    try:
+        from modules.execution_engine import ExecutionEngine
+        engine = ExecutionEngine(
+            agent_manager=app.state.agent_manager,
+            ws_manager=ws_manager,
+        )
+        status = await engine.get_execution_status(project_id)
+        return status
+    except Exception as e:
+        logger.error(f"Failed to get execution status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/projects/{project_id}/features", status_code=201)
 async def create_feature(project_id: str, request: CreateFeatureRequest):
     """Create a new feature for a project."""

@@ -1310,8 +1310,10 @@ class AgentManager:
             },
         )
         async def execute_ready_features_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-            """Execute ready features by spawning builder agents in parallel"""
+            """Execute ready features via the ExecutionEngine."""
             try:
+                from .execution_engine import ExecutionEngine
+
                 project_id = args.get("project_id")
                 max_parallel = args.get("max_parallel", 3)
 
@@ -1321,17 +1323,17 @@ class AgentManager:
                         "is_error": True,
                     }
 
-                # Get the DAG to find ready features
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"{_API_BASE}/api/projects/{project_id}/dag", timeout=15.0)
-                    data = resp.json()
+                engine = ExecutionEngine(agent_manager=self, ws_manager=self.ws_manager)
+                result = await engine.execute_features(project_id, max_parallel)
 
-                if resp.status_code not in (200, 201):
-                    return {"content": [{"type": "text", "text": f"Error: {data.get('detail', 'No features found')}"}]}
+                lines = [f"Execution result: {result.get('message', '')}\n"]
+                for run in result.get("runs", []):
+                    status = "error" if "error" in run else "started"
+                    lines.append(f"  - {run['feature']}: {status}\n")
 
-                # Use ready_features from DAG API (correctly computed by FeatureDAG.get_ready_features)
-                ready_feature_ids = data.get("ready_features", [])
-                dag_data = data.get("dag", {})
+                return {"content": [{"type": "text", "text": "".join(lines)}]}
+                # OLD CODE REMOVED — execution delegated to ExecutionEngine
+                pass  # dead code marker
                 all_features = {f["id"]: f for f in dag_data.get("features", [])}
                 dag_status = data.get("dag_status", {})
 

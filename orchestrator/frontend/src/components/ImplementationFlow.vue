@@ -1,9 +1,10 @@
 <template>
   <div class="implementation-flow">
     <FlowProgressHeader
-      :progress="flowStore.progress"
+      :progress="flowStore.dag"
       :dag-complete="flowStore.dagComplete"
       :project-name="workspaceStore.activeProject?.name"
+      :total-cost="flowStore.totalCost"
     />
 
     <div class="flow-columns">
@@ -15,21 +16,21 @@
         <div class="column-header">
           <span class="column-label">{{ col.label }}</span>
           <span class="column-count" :style="{ background: col.color + '22', color: col.color }">
-            {{ stageFeatures(col.key).length }}
+            {{ columnRuns(col.key).length }}
           </span>
         </div>
 
         <div class="column-body">
-          <TransitionGroup name="flow-card" tag="div" class="card-list">
+          <div class="card-list">
             <FlowFeatureCard
-              v-for="feature in stageFeatures(col.key)"
-              :key="feature.id"
-              :feature="feature"
-              @click="onFeatureClick(feature.id)"
+              v-for="run in columnRuns(col.key)"
+              :key="run.feature_id"
+              :run="run"
+              @click="onFeatureClick(run)"
             />
-          </TransitionGroup>
+          </div>
 
-          <div v-if="stageFeatures(col.key).length === 0" class="column-empty">
+          <div v-if="columnRuns(col.key).length === 0" class="column-empty">
             --
           </div>
         </div>
@@ -41,61 +42,44 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, watch, ref } from 'vue'
 import { useImplementFlowStore, STAGE_COLUMNS } from '../stores/implementFlowStore'
-import type { FlowStage } from '../stores/implementFlowStore'
+import type { RunStatus, ExecutionRun } from '../stores/implementFlowStore'
 import { useWorkspaceStore } from '../stores/workspaceStore'
 import FlowFeatureCard from './FlowFeatureCard.vue'
 import FlowProgressHeader from './FlowProgressHeader.vue'
 
-const props = defineProps<{
-  visible?: boolean
-}>()
+const props = defineProps<{ visible?: boolean }>()
+const emit = defineEmits<{ 'select-feature': [run: ExecutionRun] }>()
 
 const flowStore = useImplementFlowStore()
 const workspaceStore = useWorkspaceStore()
-
 const columns = STAGE_COLUMNS
+const pollInterval = ref<ReturnType<typeof setInterval> | null>(null)
 
-const emit = defineEmits<{
-  'select-feature': [featureId: string]
-}>()
-
-function stageFeatures(stage: FlowStage) {
-  return flowStore.featuresByStage[stage] || []
+function columnRuns(status: RunStatus) {
+  return flowStore.runsByStatus[status] || []
 }
 
-function onFeatureClick(featureId: string) {
-  emit('select-feature', featureId)
+function onFeatureClick(run: ExecutionRun) {
+  emit('select-feature', run)
 }
 
-async function loadData() {
+async function poll() {
   const projectId = workspaceStore.activeProjectId
-  if (projectId) {
-    await flowStore.initializeFromDag(projectId)
+  if (projectId && props.visible !== false) {
+    await flowStore.fetchStatus(projectId)
   }
 }
 
-// Load on mount + auto-refresh every 5 seconds while visible
-const refreshInterval = ref<ReturnType<typeof setInterval> | null>(null)
-
 onMounted(() => {
-  loadData()
-  refreshInterval.value = setInterval(() => {
-    if (props.visible !== false) {
-      loadData()
-    }
-  }, 5000)
+  poll()
+  pollInterval.value = setInterval(poll, 3000)
 })
 
 onUnmounted(() => {
-  if (refreshInterval.value) {
-    clearInterval(refreshInterval.value)
-  }
+  if (pollInterval.value) clearInterval(pollInterval.value)
 })
 
-// Also re-load when panel becomes visible
-watch(() => props.visible, (isVisible) => {
-  if (isVisible) { loadData() }
-})
+watch(() => props.visible, (v) => { if (v) poll() })
 </script>
 
 <style scoped>
@@ -161,7 +145,6 @@ watch(() => props.visible, (isVisible) => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  position: relative;
 }
 
 .column-empty {
@@ -169,24 +152,5 @@ watch(() => props.visible, (isVisible) => {
   color: #484f58;
   font-size: 11px;
   padding: 20px 0;
-}
-
-/* TransitionGroup animations */
-.flow-card-enter-active {
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.flow-card-leave-active {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.flow-card-enter-from {
-  opacity: 0;
-  transform: translateY(-10px) scale(0.95);
-}
-.flow-card-leave-to {
-  opacity: 0;
-  transform: translateY(10px) scale(0.95);
-}
-.flow-card-move {
-  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 </style>
