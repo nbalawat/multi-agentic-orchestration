@@ -1,0 +1,17 @@
+apiVersion: v2
+name: rapids-orchestrator
+description: RAPIDS Meta-Orchestrator - AI-powered multi-project orchestration engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - orchestration
+  - claude
+  - rapids
+maintainers:
+  - name: RAPIDS Team
+    email: rapids@example.com
+sources:
+  - https://github.com/nbalawat/multi-agentic-orchestration
+dependencies: []

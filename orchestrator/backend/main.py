@@ -10,11 +10,11 @@ import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 import json
@@ -32,6 +32,12 @@ from modules.error_types import ErrorCode, ErrorResponse
 from modules.orchestrator_service import OrchestratorService, get_orchestrator_tools
 from modules.agent_manager import AgentManager
 from modules.orch_database_models import OrchestratorAgent
+from modules.api_docs import (
+    get_openapi_metadata,
+    get_openapi_tags,
+    get_sdk_usage_guide,
+    get_response_examples,
+)
 from modules.rapids_database import (
     create_workspace as db_create_workspace,
     get_workspace as db_get_workspace,
@@ -278,8 +284,19 @@ async def lifespan(app: FastAPI):
     logger.shutdown()
 
 
-# Create FastAPI app with lifespan
-app = FastAPI(title="Orchestrator 3 Stream API", version="1.0.0", lifespan=lifespan)
+# Create FastAPI app with lifespan and comprehensive OpenAPI documentation
+openapi_metadata = get_openapi_metadata()
+app = FastAPI(
+    title=openapi_metadata["title"],
+    version=openapi_metadata["version"],
+    description=openapi_metadata["description"],
+    contact=openapi_metadata["contact"],
+    license_info=openapi_metadata["license_info"],
+    openapi_tags=get_openapi_tags(),
+    lifespan=lifespan,
+    docs_url="/docs",  # Swagger UI
+    redoc_url="/redoc",  # ReDoc UI
+)
 
 # CORS configuration
 app.add_middleware(
@@ -387,15 +404,34 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 class LoadChatRequest(BaseModel):
     """Request model for loading chat history"""
 
-    orchestrator_agent_id: str
-    limit: Optional[int] = 50
+    orchestrator_agent_id: str = Field(
+        ...,
+        description="Orchestrator agent ID to load chat history for",
+        example="orch_1a2b3c4d"
+    )
+    limit: Optional[int] = Field(
+        50,
+        description="Maximum number of chat messages to retrieve",
+        example=50,
+        ge=1,
+        le=1000
+    )
 
 
 class SendChatRequest(BaseModel):
     """Request model for sending chat message"""
 
-    message: str
-    orchestrator_agent_id: str
+    message: str = Field(
+        ...,
+        description="Chat message to send to the orchestrator agent",
+        example="Create a new workspace called 'ML Projects'",
+        min_length=1
+    )
+    orchestrator_agent_id: str = Field(
+        ...,
+        description="Orchestrator agent ID to send message to",
+        example="orch_1a2b3c4d"
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -403,7 +439,26 @@ class SendChatRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["Health"],
+    summary="Basic health check",
+    description="Quick health check endpoint that returns service status and active WebSocket connection count.",
+    responses={
+        200: {
+            "description": "Service is healthy",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "healthy",
+                        "service": "orchestrator-3-stream",
+                        "websocket_connections": 3
+                    }
+                }
+            }
+        }
+    }
+)
 async def health_check():
     """Health check endpoint"""
     logger.http_request("GET", "/health", 200)
@@ -414,7 +469,97 @@ async def health_check():
     }
 
 
-@app.get("/api/circuit-breakers")
+@app.get(
+    "/health/live",
+    tags=["Health"],
+    summary="Liveness probe for Kubernetes/container orchestration",
+    description="Lightweight health check with no external dependencies. Returns 200 if the application process is running.",
+)
+async def liveness_probe():
+    """
+    Liveness probe endpoint.
+
+    Returns 200 if the application is running and can accept requests.
+    This is a lightweight check with no external dependencies.
+    """
+    logger.http_request("GET", "/health/live", 200)
+    return {
+        "status": "alive",
+        "service": "orchestrator-3-stream",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get(
+    "/health/ready",
+    tags=["Health"],
+    summary="Readiness probe for Kubernetes/container orchestration",
+    description="Checks all critical dependencies (database, etc.) and returns 200 if ready or 503 if not ready.",
+    responses={
+        200: {
+            "description": "Service is ready to accept traffic",
+        },
+        503: {
+            "description": "Service is not ready (dependency failure)",
+        }
+    }
+)
+async def readiness_probe():
+    """
+    Readiness probe endpoint.
+
+    Returns 200 if the application is ready to serve traffic.
+    Checks:
+    - Database connectivity (PostgreSQL)
+
+    Returns 503 if any critical dependency is unavailable.
+    """
+    start_time = time.time()
+    checks = {}
+    overall_ready = True
+
+    # Check database connectivity
+    try:
+        async with database.get_connection() as conn:
+            await conn.fetchval("SELECT 1")
+        checks["database"] = {
+            "status": "healthy",
+            "type": "postgresql",
+        }
+    except Exception as e:
+        overall_ready = False
+        checks["database"] = {
+            "status": "unhealthy",
+            "type": "postgresql",
+            "error": str(e),
+        }
+
+    # Calculate total check time
+    duration_ms = round((time.time() - start_time) * 1000, 2)
+
+    status_code = 200 if overall_ready else 503
+    logger.http_request("GET", "/health/ready", status_code)
+
+    response = {
+        "status": "ready" if overall_ready else "not_ready",
+        "service": "orchestrator-3-stream",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+        "duration_ms": duration_ms,
+    }
+
+    if not overall_ready:
+        return JSONResponse(status_code=503, content=response)
+
+    return response
+
+
+@app.get(
+    "/api/circuit-breakers",
+    tags=["Circuit Breakers"],
+    summary="Get circuit breaker status",
+    description="Monitor all circuit breakers in the system with their state, failure counts, and timing information.",
+)
 async def get_circuit_breaker_status():
     """
     Get the current status of all registered circuit breakers.
@@ -478,7 +623,12 @@ async def get_active_context():
         return {"status": "error", "detail": str(e)}
 
 
-@app.get("/get_orchestrator")
+@app.get(
+    "/get_orchestrator",
+    tags=["Orchestrator"],
+    summary="Get orchestrator information",
+    description="Retrieve orchestrator agent metadata including session ID, usage costs, and available commands.",
+)
 async def get_orchestrator_info():
     """
     Get orchestrator agent information including system metadata.
@@ -758,7 +908,12 @@ async def open_file_in_ide(request: OpenFileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/load_chat")
+@app.post(
+    "/load_chat",
+    tags=["Orchestrator"],
+    summary="Load chat history",
+    description="Retrieve conversation history for the orchestrator agent with pagination support.",
+)
 async def load_chat(request: LoadChatRequest):
     """
     Load chat history for orchestrator agent.
@@ -787,7 +942,12 @@ async def load_chat(request: LoadChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/send_chat")
+@app.post(
+    "/send_chat",
+    tags=["Orchestrator"],
+    summary="Send chat message to orchestrator",
+    description="Send a message to the orchestrator agent for processing. Responses stream via WebSocket.",
+)
 async def send_chat(request: SendChatRequest):
     """
     Send message to orchestrator agent.
@@ -922,7 +1082,12 @@ async def get_events_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/list_agents")
+@app.get(
+    "/list_agents",
+    tags=["Agents"],
+    summary="List all active agents",
+    description="Retrieve all agents managed by the orchestrator with their current status and metadata.",
+)
 async def list_agents_endpoint():
     """
     List all active agents for sidebar display.
@@ -1019,34 +1184,106 @@ async def websocket_endpoint(websocket: WebSocket):
 
 class CreateWorkspaceRequest(BaseModel):
     """Request model for creating a workspace."""
-    name: str
-    description: Optional[str] = None
+
+    name: str = Field(
+        ...,
+        description="Human-readable workspace name",
+        example="ML Research Projects",
+        min_length=1,
+        max_length=255
+    )
+    description: Optional[str] = Field(
+        None,
+        description="Optional description of workspace purpose and contents",
+        example="Workspace for machine learning research and experiments"
+    )
 
 
 class CreateProjectRequest(BaseModel):
     """Request model for onboarding a project."""
-    name: str
-    repo_path: str
-    archetype: str
-    repo_url: Optional[str] = None
-    plugin_id: Optional[str] = None
+
+    name: str = Field(
+        ...,
+        description="Project name (kebab-case recommended)",
+        example="agent-memory",
+        min_length=1,
+        max_length=255
+    )
+    repo_path: str = Field(
+        ...,
+        description="Absolute filesystem path to the project repository",
+        example="/Users/dev/projects/agent-memory"
+    )
+    archetype: str = Field(
+        ...,
+        description="Project archetype: greenfield, refactor, debug, enhancement",
+        example="greenfield"
+    )
+    repo_url: Optional[str] = Field(
+        None,
+        description="Optional Git repository URL",
+        example="https://github.com/org/agent-memory"
+    )
+    plugin_id: Optional[str] = Field(
+        None,
+        description="Optional specific plugin ID to use (auto-detected from archetype if omitted)",
+        example="greenfield"
+    )
 
 
 class CreateFeatureRequest(BaseModel):
     """Request model for creating a feature."""
-    name: str
-    description: Optional[str] = None
-    depends_on: Optional[List[str]] = None
-    acceptance_criteria: Optional[List[str]] = None
-    priority: Optional[int] = 0
-    estimated_complexity: Optional[str] = None
-    spec_file: Optional[str] = None
+
+    name: str = Field(
+        ...,
+        description="Feature name (human-readable)",
+        example="Authentication System"
+    )
+    description: Optional[str] = Field(
+        None,
+        description="Detailed feature description",
+        example="Implement JWT-based authentication with role-based access control"
+    )
+    depends_on: Optional[List[str]] = Field(
+        None,
+        description="List of feature IDs this feature depends on",
+        example=["feat_user_model", "feat_database_setup"]
+    )
+    acceptance_criteria: Optional[List[str]] = Field(
+        None,
+        description="List of acceptance criteria that must be met",
+        example=["Users can login with email/password", "JWT tokens are issued on successful login"]
+    )
+    priority: Optional[int] = Field(
+        0,
+        description="Feature priority (higher = more important)",
+        example=10
+    )
+    estimated_complexity: Optional[str] = Field(
+        None,
+        description="Estimated complexity: low, medium, high",
+        example="medium"
+    )
+    spec_file: Optional[str] = Field(
+        None,
+        description="Optional path to feature specification file",
+        example=".rapids/plan/features/feat_auth_system/spec.md"
+    )
 
 
 class UpdateFeatureStatusRequest(BaseModel):
     """Request model for updating a feature's status."""
-    status: str
-    assigned_agent_id: Optional[str] = None
+
+    status: str = Field(
+        ...,
+        description="New feature status: pending, ready, in_progress, verifying, complete, failed",
+        example="in_progress"
+    )
+    assigned_agent_id: Optional[str] = Field(
+        None,
+        description="Optional agent ID to assign to this feature",
+        example="agent_7x8y9z"
+    )
 
 
 class PhaseActionRequest(BaseModel):
@@ -1059,7 +1296,12 @@ class PhaseActionRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════
 
 
-@app.get("/api/workspaces")
+@app.get(
+    "/api/workspaces",
+    tags=["Workspaces"],
+    summary="List all workspaces",
+    description="Retrieve a list of all workspaces in the system.",
+)
 async def list_workspaces():
     """List all workspaces."""
     try:
@@ -1075,7 +1317,13 @@ async def list_workspaces():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/workspaces", status_code=201)
+@app.post(
+    "/api/workspaces",
+    status_code=201,
+    tags=["Workspaces"],
+    summary="Create a new workspace",
+    description="Create a new workspace for organizing multiple projects.",
+)
 async def create_workspace(request: CreateWorkspaceRequest):
     """Create a new workspace."""
     try:
@@ -1094,7 +1342,12 @@ async def create_workspace(request: CreateWorkspaceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/workspaces/{workspace_id}")
+@app.get(
+    "/api/workspaces/{workspace_id}",
+    tags=["Workspaces"],
+    summary="Get workspace by ID",
+    description="Retrieve detailed information about a specific workspace.",
+)
 async def get_workspace(workspace_id: str):
     """Get workspace details."""
     try:
@@ -1121,7 +1374,12 @@ async def get_workspace(workspace_id: str):
 # ═══════════════════════════════════════════════════════════
 
 
-@app.get("/api/workspaces/{workspace_id}/projects")
+@app.get(
+    "/api/workspaces/{workspace_id}/projects",
+    tags=["Projects"],
+    summary="List projects in workspace",
+    description="Retrieve all projects belonging to a specific workspace.",
+)
 async def list_projects_in_workspace(workspace_id: str):
     """List all projects in a workspace."""
     try:
@@ -1139,7 +1397,13 @@ async def list_projects_in_workspace(workspace_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/workspaces/{workspace_id}/projects", status_code=201)
+@app.post(
+    "/api/workspaces/{workspace_id}/projects",
+    status_code=201,
+    tags=["Projects"],
+    summary="Onboard a new project",
+    description="Add a new project to a workspace with repository path and archetype configuration.",
+)
 async def onboard_project(workspace_id: str, request: CreateProjectRequest):
     """Onboard a new project into a workspace."""
     try:
@@ -1191,7 +1455,12 @@ async def onboard_project(workspace_id: str, request: CreateProjectRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/projects/{project_id}")
+@app.get(
+    "/api/projects/{project_id}",
+    tags=["Projects"],
+    summary="Get project by ID",
+    description="Retrieve detailed information about a specific project including current phase and configuration.",
+)
 async def get_project(project_id: str):
     """Get project details."""
     try:
@@ -1213,7 +1482,12 @@ async def get_project(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/projects/{project_id}/switch")
+@app.post(
+    "/api/projects/{project_id}/switch",
+    tags=["Projects"],
+    summary="Switch active project context",
+    description="Make the specified project the active context for the orchestrator.",
+)
 async def switch_project_context(project_id: str):
     """Switch active project context."""
     try:
@@ -1272,7 +1546,12 @@ async def answer_question(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/projects/{project_id}/phases")
+@app.get(
+    "/api/projects/{project_id}/phases",
+    tags=["Phases"],
+    summary="Get all project phases",
+    description="Retrieve status information for all RAPIDS lifecycle phases (Research, Analysis, Plan, Implement, Deploy, Sustain).",
+)
 async def get_project_phases(project_id: str):
     """Get all phase statuses for a project."""
     try:
@@ -1468,7 +1747,12 @@ async def advance_phase(
 # ═══════════════════════════════════════════════════════════
 
 
-@app.get("/api/projects/{project_id}/features")
+@app.get(
+    "/api/projects/{project_id}/features",
+    tags=["Features"],
+    summary="List all features for a project",
+    description="Retrieve all features in the project's feature DAG with their statuses and dependencies.",
+)
 async def list_project_features(project_id: str):
     """List all features for a project."""
     try:
@@ -1806,7 +2090,12 @@ async def update_feature_status(project_id: str, feature_id: str, request: Reque
 # ═══════════════════════════════════════════════════════════
 
 
-@app.get("/api/plugins")
+@app.get(
+    "/api/plugins",
+    tags=["Plugins"],
+    summary="List all available plugins",
+    description="Retrieve all archetype plugins available in the system with their capabilities.",
+)
 async def list_plugins():
     """List all available plugins."""
     try:
@@ -1823,7 +2112,12 @@ async def list_plugins():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/plugins/{name}")
+@app.get(
+    "/api/plugins/{name}",
+    tags=["Plugins"],
+    summary="Get plugin details",
+    description="Retrieve detailed information about a specific archetype plugin including commands, skills, and agents.",
+)
 async def get_plugin_details(name: str):
     """Get details for a specific plugin."""
     try:
@@ -1841,6 +2135,71 @@ async def get_plugin_details(name: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get plugin details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════
+# SDK DOCUMENTATION ENDPOINTS
+# ═══════════════════════════════════════════════════════════
+
+
+@app.get(
+    "/api/sdk-usage",
+    tags=["Utilities"],
+    summary="Get SDK usage guide",
+    description="Comprehensive SDK usage examples for Python, JavaScript/TypeScript, and cURL.",
+    response_description="Markdown-formatted SDK usage guide",
+)
+async def get_sdk_usage():
+    """
+    Get comprehensive SDK usage guide.
+
+    Returns detailed examples for:
+    - Python SDK with httpx
+    - JavaScript/TypeScript SDK with axios
+    - WebSocket integration
+    - cURL examples for all endpoints
+    """
+    try:
+        logger.http_request("GET", "/api/sdk-usage")
+        guide = get_sdk_usage_guide()
+        logger.http_request("GET", "/api/sdk-usage", 200)
+        return {
+            "status": "success",
+            "content": guide,
+            "format": "markdown"
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve SDK usage guide: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(
+    "/api/examples",
+    tags=["Utilities"],
+    summary="Get API response examples",
+    description="Example responses for all major API endpoints.",
+)
+async def get_api_examples():
+    """
+    Get example API responses for documentation.
+
+    Returns example responses for:
+    - Workspace operations
+    - Project operations
+    - Feature operations
+    - Agent operations
+    """
+    try:
+        logger.http_request("GET", "/api/examples")
+        examples = get_response_examples()
+        logger.http_request("GET", "/api/examples", 200)
+        return {
+            "status": "success",
+            "examples": examples
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve API examples: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

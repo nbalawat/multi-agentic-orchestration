@@ -1,0 +1,169 @@
+name: Load Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Test scenario to run'
+        required: true
+        default: 'quick'
+        type: choice
+        options:
+          - quick
+          - rampup
+          - sustained
+          - spike
+          - stress
+          - all
+      backend_url:
+        description: 'Backend URL'
+        required: false
+        default: 'http://127.0.0.1:9403'
+  schedule:
+    # Run quick test daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  load-test:
+    name: Run Load Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rapids
+          POSTGRES_PASSWORD: rapids_test_2024
+          POSTGRES_DB: rapids_orchestrator
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install UV
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r tests/load/requirements.txt
+          uv sync
+
+      - name: Run database migrations
+        env:
+          DATABASE_URL: postgresql://rapids:rapids_test_2024@localhost:5434/rapids_orchestrator
+        run: |
+          for migration in orchestrator/db/migrations/*.sql; do
+            PGPASSWORD=rapids_test_2024 psql -h localhost -p 5434 -U rapids -d rapids_orchestrator -f "$migration"
+          done
+
+      - name: Start backend
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABASE_URL: postgresql://rapids:rapids_test_2024@localhost:5434/rapids_orchestrator
+        run: |
+          cd orchestrator/backend
+          uv run uvicorn main:app --host 127.0.0.1 --port 9403 &
+          echo "Waiting for backend to start..."
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:9403/health > /dev/null; then
+              echo "Backend is ready"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+
+      - name: Setup test data
+        run: |
+          cd tests/load
+          python setup_test_data.py --workspaces 3 --projects 5 --features 3
+
+      - name: Run load test
+        run: |
+          cd tests/load
+          SCENARIO="${{ github.event.inputs.scenario || 'quick' }}"
+          ./run_load_test.sh "$SCENARIO" --headless
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-reports
+          path: tests/load/reports/
+          retention-days: 30
+
+      - name: Check performance targets
+        if: always()
+        run: |
+          cd tests/load
+          python - <<EOF
+          import csv
+          import sys
+          from pathlib import Path
+
+          reports_dir = Path("reports")
+          latest_stats = sorted(reports_dir.glob("*_stats.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+          if not latest_stats:
+              print("❌ No stats file found")
+              sys.exit(1)
+
+          stats_file = latest_stats[0]
+          print(f"📊 Analyzing: {stats_file.name}")
+
+          with open(stats_file, 'r') as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  if row['Name'] == 'Aggregated':
+                      p95 = float(row['95%'])
+                      rps = float(row['Requests/s'])
+                      failure_rate = float(row['Failure Count']) / max(float(row['Request Count']), 1) * 100
+
+                      print(f"\n📈 Performance Metrics:")
+                      print(f"  RPS: {rps:.2f}")
+                      print(f"  P95 Latency: {p95:.2f}ms")
+                      print(f"  Failure Rate: {failure_rate:.2f}%")
+
+                      # Check targets
+                      passed = True
+                      if p95 > 300:
+                          print(f"❌ P95 latency exceeds target (300ms)")
+                          passed = False
+                      if failure_rate > 1:
+                          print(f"❌ Failure rate exceeds target (1%)")
+                          passed = False
+
+                      if passed:
+                          print("✅ All performance targets met")
+                          sys.exit(0)
+                      else:
+                          print("❌ Performance targets not met")
+                          sys.exit(1)
+          EOF
+
+  scheduled-test-notification:
+    name: Send Test Results
+    runs-on: ubuntu-latest
+    needs: load-test
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "⚠️ Scheduled load test failed"
+          # Add notification logic here (Slack, email, etc.)

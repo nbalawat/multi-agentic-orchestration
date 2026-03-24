@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+data:
+  LOG_LEVEL: {{ .Values.backend.env.LOG_LEVEL | quote }}
+  ENVIRONMENT: {{ .Values.backend.env.ENVIRONMENT | quote }}
+  JWT_ALGORITHM: {{ .Values.backend.env.JWT_ALGORITHM | quote }}
+  ACCESS_TOKEN_EXPIRE_MINUTES: {{ .Values.backend.env.ACCESS_TOKEN_EXPIRE_MINUTES | quote }}
+  BACKEND_HOST: "0.0.0.0"
+  BACKEND_PORT: "9403"
+  POSTGRES_USER: {{ .Values.postgresql.auth.username | quote }}
+  POSTGRES_DB: {{ .Values.postgresql.auth.database | quote }}
+  POSTGRES_HOST: {{ include "rapids-orchestrator.fullname" . }}-postgresql
+  POSTGRES_PORT: {{ .Values.postgresql.service.port | quote }}

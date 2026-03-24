@@ -1,0 +1,323 @@
+# Default values for rapids-orchestrator
+# This is a YAML-formatted file.
+
+# Global configuration
+global:
+  imagePullSecrets: []
+  storageClass: ""
+
+# Backend configuration
+backend:
+  replicaCount: 2
+  image:
+    repository: rapids-orchestrator/backend
+    pullPolicy: IfNotPresent
+    tag: "0.1.0"
+
+  service:
+    type: ClusterIP
+    port: 9403
+    targetPort: 9403
+    annotations: {}
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  env:
+    LOG_LEVEL: info
+    ENVIRONMENT: production
+    JWT_ALGORITHM: HS256
+    ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+
+  # Secret environment variables (stored in Kubernetes Secret)
+  secretEnv:
+    ANTHROPIC_API_KEY: ""  # Override in values-production.yaml or via --set
+    JWT_SECRET_KEY: ""     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 9403
+    initialDelaySeconds: 40
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 9403
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: false
+
+# Frontend configuration
+frontend:
+  replicaCount: 2
+  image:
+    repository: rapids-orchestrator/frontend
+    pullPolicy: IfNotPresent
+    tag: "0.1.0"
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+    annotations: {}
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: false
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 5432
+
+  auth:
+    username: rapids
+    password: ""  # Override in values-production.yaml or via --set
+    database: rapids_orchestrator
+
+  primary:
+    resources:
+      limits:
+        cpu: 2000m
+        memory: 8Gi
+      requests:
+        cpu: 500m
+        memory: 2Gi
+
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: ""
+
+    podAnnotations: {}
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      fsGroup: 999
+
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+
+  metrics:
+    enabled: true
+    resources:
+      limits:
+        cpu: 200m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+
+# Database migrations job
+migrations:
+  enabled: true
+  image:
+    repository: rapids-orchestrator/backend
+    tag: "0.1.0"
+  backoffLimit: 3
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/websocket-services: "rapids-backend"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+  hosts:
+    - host: rapids.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          backend: backend
+        - path: /ws
+          pathType: Prefix
+          backend: backend
+        - path: /health
+          pathType: Prefix
+          backend: backend
+        - path: /
+          pathType: Prefix
+          backend: frontend
+
+  tls:
+    - secretName: rapids-tls
+      hosts:
+        - rapids.example.com
+
+# Service Account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "rapids-orchestrator"
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+
+# Persistent storage for workspace and logs
+persistence:
+  workspace:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+    accessMode: ReadWriteMany
+
+  logs:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+    accessMode: ReadWriteMany
+
+# Monitoring and observability
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+# Automated database backups
+backup:
+  enabled: true
+
+  # Cron schedule (UTC timezone)
+  # Default: Daily at 2 AM UTC
+  schedule: "0 2 * * *"
+
+  # Retention policy
+  retentionDays: 30
+
+  # Job history limits
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # S3 configuration for remote backup storage
+  s3:
+    enabled: true
+    bucket: "rapids-orchestrator-backups"
+    region: "us-east-1"
+    credentialsSecret: "s3-backup-credentials"
+
+  # Persistent volume for local backups
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 50Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+  # Monitoring integration
+  monitoring:
+    enabled: true
+    metricsPort: 9091
+
+  # Resource limits for backup jobs
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi

@@ -1,0 +1,64 @@
+RAPIDS Meta-Orchestrator has been deployed!
+
+Release Name: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+1. Check the status of your deployment:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+2. Watch the migration job:
+
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=migrations -f
+
+3. Get the application URL:
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   https://{{ .host }}
+{{- end }}
+{{- else if contains "NodePort" .Values.frontend.service.type }}
+   export NODE_PORT=$(kubectl get -n {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "rapids-orchestrator.fullname" . }}-frontend)
+   export NODE_IP=$(kubectl get nodes -n {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+   echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.frontend.service.type }}
+   NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+   export SERVICE_IP=$(kubectl get svc -n {{ .Release.Namespace }} {{ include "rapids-orchestrator.fullname" . }}-frontend -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+   echo http://$SERVICE_IP:{{ .Values.frontend.service.port }}
+{{- else if contains "ClusterIP" .Values.frontend.service.type }}
+   export POD_NAME=$(kubectl get pods -n {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "rapids-orchestrator.name" . }},app.kubernetes.io/component=frontend" -o jsonpath="{.items[0].metadata.name}")
+   kubectl port-forward -n {{ .Release.Namespace }} $POD_NAME 8080:8080
+   echo "Visit http://127.0.0.1:8080 in your browser"
+{{- end }}
+
+4. View backend logs:
+
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=backend -f
+
+5. View PostgreSQL logs:
+
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=database -f
+
+{{- if .Values.backend.autoscaling.enabled }}
+
+6. Check HPA status:
+
+   kubectl get hpa -n {{ .Release.Namespace }}
+
+{{- end }}
+
+{{- if .Values.monitoring.enabled }}
+
+7. Access Prometheus metrics:
+
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "rapids-orchestrator.fullname" . }}-metrics 9187:9187
+
+{{- end }}
+
+Important Configuration:
+- Backend replicas: {{ .Values.backend.replicaCount }}{{ if .Values.backend.autoscaling.enabled }} (auto-scaling enabled: {{ .Values.backend.autoscaling.minReplicas }}-{{ .Values.backend.autoscaling.maxReplicas }}){{ end }}
+- Frontend replicas: {{ .Values.frontend.replicaCount }}{{ if .Values.frontend.autoscaling.enabled }} (auto-scaling enabled: {{ .Values.frontend.autoscaling.minReplicas }}-{{ .Values.frontend.autoscaling.maxReplicas }}){{ end }}
+- PostgreSQL persistence: {{ if .Values.postgresql.primary.persistence.enabled }}Enabled ({{ .Values.postgresql.primary.persistence.size }}){{ else }}Disabled{{ end }}
+- Workspace persistence: {{ if .Values.persistence.workspace.enabled }}Enabled ({{ .Values.persistence.workspace.size }}){{ else }}Disabled{{ end }}
+
+For more information, visit: https://github.com/nbalawat/multi-agentic-orchestration

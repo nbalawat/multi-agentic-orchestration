@@ -1,0 +1,33 @@
+{
+  "name": "Ramp-Up Scenario",
+  "description": "Gradually increase load to test system behavior under growing traffic",
+  "target_rps": 1000,
+  "duration_seconds": 600,
+  "stages": [
+    {
+      "duration": "2m",
+      "users": 50,
+      "spawn_rate": 5,
+      "description": "Warm-up: 50 users"
+    },
+    {
+      "duration": "3m",
+      "users": 200,
+      "spawn_rate": 10,
+      "description": "Ramp to 200 users"
+    },
+    {
+      "duration": "3m",
+      "users": 500,
+      "spawn_rate": 20,
+      "description": "Ramp to 500 users"
+    },
+    {
+      "duration": "2m",
+      "users": 1000,
+      "spawn_rate": 50,
+      "description": "Peak: 1000 users"
+    }
+  ],
+  "locust_command": "locust -f locustfile.py --host=http://127.0.0.1:9403 --users=1000 --spawn-rate=50 --run-time=10m --html=reports/rampup_report.html --csv=reports/rampup"
+}

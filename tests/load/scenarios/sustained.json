@@ -1,0 +1,21 @@
+{
+  "name": "Sustained Load Scenario",
+  "description": "Maintain constant high load to test system stability over time",
+  "target_rps": 1000,
+  "duration_seconds": 1800,
+  "stages": [
+    {
+      "duration": "2m",
+      "users": 100,
+      "spawn_rate": 20,
+      "description": "Ramp-up to baseline"
+    },
+    {
+      "duration": "26m",
+      "users": 800,
+      "spawn_rate": 50,
+      "description": "Sustained load at 800 users"
+    }
+  ],
+  "locust_command": "locust -f locustfile.py --host=http://127.0.0.1:9403 --users=800 --spawn-rate=50 --run-time=30m --html=reports/sustained_report.html --csv=reports/sustained"
+}

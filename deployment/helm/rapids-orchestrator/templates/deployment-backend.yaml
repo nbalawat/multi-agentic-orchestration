@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backend
+  labels:
+    {{- include "rapids-orchestrator.backend.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.backend.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "rapids-orchestrator.backend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.backend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "rapids-orchestrator.backend.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "rapids-orchestrator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.backend.podSecurityContext | nindent 8 }}
+      containers:
+        - name: backend
+          securityContext:
+            {{- toYaml .Values.backend.securityContext | nindent 12 }}
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.targetPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rapids-orchestrator.fullname" . }}
+            - secretRef:
+                name: {{ include "rapids-orchestrator.fullname" . }}
+          livenessProbe:
+            {{- toYaml .Values.backend.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.backend.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /app/workspace
+            - name: logs
+              mountPath: /app/logs
+            - name: plugins
+              mountPath: /app/.claude
+              readOnly: true
+      volumes:
+        - name: workspace
+          {{- if .Values.persistence.workspace.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "rapids-orchestrator.fullname" . }}-workspace
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: logs
+          {{- if .Values.persistence.logs.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "rapids-orchestrator.fullname" . }}-logs
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: plugins
+          configMap:
+            name: {{ include "rapids-orchestrator.fullname" . }}-plugins
+            optional: true
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

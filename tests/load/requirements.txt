@@ -1,0 +1,13 @@
+# RAPIDS Load Testing Dependencies
+
+# Core load testing framework
+locust>=2.20.0
+
+# Data generation and utilities
+faker>=24.0.0
+
+# HTTP client
+httpx>=0.27.0
+
+# For parsing scenario configs
+# (Python's built-in json module is sufficient)

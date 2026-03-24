@@ -1,0 +1,2 @@
+Validation session initialized: 2026-03-22 sidebar collapse/expand test
+Target: http://127.0.0.1:5175

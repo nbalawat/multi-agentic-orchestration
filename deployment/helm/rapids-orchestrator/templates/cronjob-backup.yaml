@@ -1,0 +1,215 @@
+{{- if .Values.backup.enabled }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backup
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit | default 3 }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "rapids-orchestrator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backup
+    spec:
+      template:
+        metadata:
+          annotations:
+            checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+          labels:
+            {{- include "rapids-orchestrator.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "rapids-orchestrator.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+
+          initContainers:
+          # Install pg_dump tools
+          - name: install-postgres-client
+            image: postgres:16-alpine
+            command:
+              - sh
+              - -c
+              - |
+                cp /usr/local/bin/pg_dump /shared/pg_dump
+                cp /usr/local/bin/pg_restore /shared/pg_restore
+                chmod +x /shared/pg_dump /shared/pg_restore
+            volumeMounts:
+              - name: shared-bin
+                mountPath: /shared
+
+          containers:
+          - name: backup
+            image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default .Chart.AppVersion }}"
+            imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+
+            command:
+              - python
+              - /app/infrastructure/scripts/backup/backup.py
+              - --retention-days
+              - "{{ .Values.backup.retentionDays }}"
+
+            env:
+              # Database connection
+              - name: DATABASE_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.postgresql.existingSecret | default (printf "%s-postgresql" (include "rapids-orchestrator.fullname" .)) }}
+                    key: database-url
+
+              # Backup configuration
+              - name: BACKUP_DIR
+                value: /backups
+
+              - name: S3_BACKUP_BUCKET
+                value: {{ .Values.backup.s3.bucket | quote }}
+
+              {{- if .Values.backup.s3.enabled }}
+              # AWS credentials for S3 upload
+              - name: AWS_ACCESS_KEY_ID
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.backup.s3.credentialsSecret }}
+                    key: access-key-id
+
+              - name: AWS_SECRET_ACCESS_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.backup.s3.credentialsSecret }}
+                    key: secret-access-key
+
+              - name: AWS_DEFAULT_REGION
+                value: {{ .Values.backup.s3.region | quote }}
+              {{- end }}
+
+              # Python environment
+              - name: PYTHONUNBUFFERED
+                value: "1"
+
+              - name: PATH
+                value: "/shared:/usr/local/bin:/usr/bin:/bin"
+
+            volumeMounts:
+              - name: backups
+                mountPath: /backups
+              - name: shared-bin
+                mountPath: /shared
+
+            resources:
+              {{- toYaml .Values.backup.resources | nindent 14 }}
+
+          volumes:
+            - name: backups
+              {{- if .Values.backup.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.backup.persistence.existingClaim | default (printf "%s-backups" (include "rapids-orchestrator.fullname" .)) }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+
+            - name: shared-bin
+              emptyDir: {}
+
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+---
+# PersistentVolumeClaim for backups
+{{- if and .Values.backup.persistence.enabled (not .Values.backup.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backups
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - {{ .Values.backup.persistence.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size | quote }}
+  {{- if .Values.backup.persistence.storageClass }}
+  {{- if (eq "-" .Values.backup.persistence.storageClass) }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.backup.persistence.storageClass | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+
+---
+# ServiceMonitor for backup metrics (if Prometheus Operator is installed)
+{{- if and .Values.backup.monitoring.enabled .Values.prometheus.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backup
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  selector:
+    matchLabels:
+      {{- include "rapids-orchestrator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backup-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+{{- end }}
+
+---
+# ConfigMap with backup scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backup-scripts
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+data:
+  backup-wrapper.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "Starting RAPIDS backup job at $(date)"
+
+    # Run backup
+    python /app/infrastructure/scripts/backup/backup.py \
+      --retention-days {{ .Values.backup.retentionDays }}
+
+    # Expose metrics for Prometheus
+    if [ -f /backups/backup_metrics.prom ]; then
+      # Copy metrics to shared volume for Prometheus scraping
+      cp /backups/backup_metrics.prom /metrics/backup_metrics.prom
+      echo "Backup metrics exported"
+    fi
+
+    echo "Backup job completed at $(date)"
+
+{{- end }}

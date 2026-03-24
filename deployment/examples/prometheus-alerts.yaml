@@ -1,0 +1,167 @@
+# Example Prometheus alerting rules for RAPIDS
+# Place in infrastructure/prometheus/alerts/rapids-alerts.yaml
+
+groups:
+  - name: rapids_orchestrator
+    interval: 30s
+    rules:
+      # Backend availability
+      - alert: RapidsBackendDown
+        expr: up{job="rapids-orchestrator-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: backend
+        annotations:
+          summary: "RAPIDS backend is down"
+          description: "Backend pod {{ $labels.pod }} has been down for more than 2 minutes"
+
+      # High error rate
+      - alert: RapidsHighErrorRate
+        expr: |
+          rate(http_requests_total{job="rapids-orchestrator-backend",status=~"5.."}[5m])
+          /
+          rate(http_requests_total{job="rapids-orchestrator-backend"}[5m])
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+
+      # High response time
+      - alert: RapidsSlowResponses
+        expr: |
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket{job="rapids-orchestrator-backend"}[5m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: "Slow API responses"
+          description: "95th percentile response time is {{ $value }}s"
+
+      # Database connection issues
+      - alert: RapidsPostgreSQLDown
+        expr: up{job="rapids-orchestrator-postgresql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL has been unreachable for more than 1 minute"
+
+      # High database connections
+      - alert: RapidsHighDatabaseConnections
+        expr: |
+          pg_stat_database_numbackends{datname="rapids_orchestrator"}
+          /
+          pg_settings_max_connections
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "High number of database connections"
+          description: "Database connections at {{ $value | humanizePercentage }} of maximum"
+
+      # Memory usage
+      - alert: RapidsHighMemoryUsage
+        expr: |
+          container_memory_usage_bytes{pod=~"rapids-orchestrator-backend.*"}
+          /
+          container_spec_memory_limit_bytes{pod=~"rapids-orchestrator-backend.*"}
+          > 0.90
+        for: 5m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: "High memory usage"
+          description: "Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of memory limit"
+
+      # CPU usage
+      - alert: RapidsHighCPUUsage
+        expr: |
+          rate(container_cpu_usage_seconds_total{pod=~"rapids-orchestrator-backend.*"}[5m])
+          /
+          container_spec_cpu_quota{pod=~"rapids-orchestrator-backend.*"}
+          * 100000
+          > 0.90
+        for: 10m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: "High CPU usage"
+          description: "Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of CPU limit"
+
+      # Active agents monitoring
+      - alert: RapidsNoActiveAgents
+        expr: active_agents_gauge == 0
+        for: 30m
+        labels:
+          severity: info
+          component: orchestrator
+        annotations:
+          summary: "No active agents"
+          description: "No agents have been active for 30 minutes - this may be expected"
+
+      # WebSocket connections
+      - alert: RapidsNoWebSocketConnections
+        expr: websocket_connections_gauge == 0
+        for: 15m
+        labels:
+          severity: info
+          component: backend
+        annotations:
+          summary: "No WebSocket connections"
+          description: "No active WebSocket connections for 15 minutes"
+
+      # Disk usage
+      - alert: RapidsDiskSpaceLow
+        expr: |
+          (
+            kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"rapids-orchestrator.*"}
+            /
+            kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"rapids-orchestrator.*"}
+          ) < 0.15
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Low disk space"
+          description: "PVC {{ $labels.persistentvolumeclaim }} has less than 15% free space"
+
+      # Pod restarts
+      - alert: RapidsFrequentRestarts
+        expr: |
+          rate(kube_pod_container_status_restarts_total{pod=~"rapids-orchestrator.*"}[15m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: kubernetes
+        annotations:
+          summary: "Frequent pod restarts"
+          description: "Pod {{ $labels.pod }} is restarting frequently"
+
+      # HPA at max replicas
+      - alert: RapidsHPAMaxedOut
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~"rapids-orchestrator.*"}
+          ==
+          kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~"rapids-orchestrator.*"}
+        for: 15m
+        labels:
+          severity: warning
+          component: autoscaling
+        annotations:
+          summary: "HPA at maximum replicas"
+          description: "HPA {{ $labels.horizontalpodautoscaler }} has been at max replicas for 15 minutes - consider increasing max"

@@ -1,0 +1,39 @@
+{
+  "name": "Spike Test Scenario",
+  "description": "Sudden traffic spikes to test system resilience and recovery",
+  "target_rps": 1500,
+  "duration_seconds": 600,
+  "stages": [
+    {
+      "duration": "2m",
+      "users": 100,
+      "spawn_rate": 20,
+      "description": "Baseline: 100 users"
+    },
+    {
+      "duration": "1m",
+      "users": 1500,
+      "spawn_rate": 200,
+      "description": "SPIKE: Rapid jump to 1500 users"
+    },
+    {
+      "duration": "3m",
+      "users": 1500,
+      "spawn_rate": 0,
+      "description": "Hold spike load"
+    },
+    {
+      "duration": "1m",
+      "users": 100,
+      "spawn_rate": 200,
+      "description": "Drop back to baseline"
+    },
+    {
+      "duration": "3m",
+      "users": 100,
+      "spawn_rate": 0,
+      "description": "Recovery period"
+    }
+  ],
+  "locust_command": "locust -f locustfile.py --host=http://127.0.0.1:9403 --users=1500 --spawn-rate=200 --run-time=10m --html=reports/spike_report.html --csv=reports/spike"
+}

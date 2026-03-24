@@ -1,0 +1,45 @@
+{{- if .Values.persistence.workspace.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-workspace
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workspace
+spec:
+  accessModes:
+    - {{ .Values.persistence.workspace.accessMode }}
+  {{- if .Values.persistence.workspace.storageClass }}
+  {{- if (eq "-" .Values.persistence.workspace.storageClass) }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.persistence.workspace.storageClass | quote }}
+  {{- end }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.workspace.size | quote }}
+{{- end }}
+---
+{{- if .Values.persistence.logs.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-logs
+  labels:
+    {{- include "rapids-orchestrator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: logs
+spec:
+  accessModes:
+    - {{ .Values.persistence.logs.accessMode }}
+  {{- if .Values.persistence.logs.storageClass }}
+  {{- if (eq "-" .Values.persistence.logs.storageClass) }}
+  storageClassName: ""
+  {{- else }}
+  storageClassName: {{ .Values.persistence.logs.storageClass | quote }}
+  {{- end }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.logs.size | quote }}
+{{- end }}

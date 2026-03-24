@@ -1,0 +1,71 @@
+# Example GitLab CI/CD configuration
+# Place this in .gitlab-ci.yml
+
+stages:
+  - build
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  REGISTRY: $CI_REGISTRY
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+
+build-backend:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+  script:
+    - docker build -f Dockerfile.backend -t $REGISTRY/$CI_PROJECT_PATH/backend:$IMAGE_TAG .
+    - docker push $REGISTRY/$CI_PROJECT_PATH/backend:$IMAGE_TAG
+    - docker tag $REGISTRY/$CI_PROJECT_PATH/backend:$IMAGE_TAG $REGISTRY/$CI_PROJECT_PATH/backend:latest
+    - docker push $REGISTRY/$CI_PROJECT_PATH/backend:latest
+  only:
+    - main
+    - tags
+
+build-frontend:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+  script:
+    - docker build -f Dockerfile.frontend -t $REGISTRY/$CI_PROJECT_PATH/frontend:$IMAGE_TAG .
+    - docker push $REGISTRY/$CI_PROJECT_PATH/frontend:$IMAGE_TAG
+    - docker tag $REGISTRY/$CI_PROJECT_PATH/frontend:$IMAGE_TAG $REGISTRY/$CI_PROJECT_PATH/frontend:latest
+    - docker push $REGISTRY/$CI_PROJECT_PATH/frontend:latest
+  only:
+    - main
+    - tags
+
+deploy-production:
+  stage: deploy
+  image: alpine/k8s:1.28.0
+  before_script:
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG" > ~/.kube/config
+  script:
+    - helm upgrade --install rapids-orchestrator ./deployment/helm/rapids-orchestrator
+        --namespace rapids
+        --create-namespace
+        --set backend.image.repository=$REGISTRY/$CI_PROJECT_PATH/backend
+        --set backend.image.tag=$IMAGE_TAG
+        --set frontend.image.repository=$REGISTRY/$CI_PROJECT_PATH/frontend
+        --set frontend.image.tag=$IMAGE_TAG
+        --set backend.secretEnv.ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+        --set backend.secretEnv.JWT_SECRET_KEY=$JWT_SECRET_KEY
+        --set postgresql.auth.password=$POSTGRES_PASSWORD
+        --wait
+        --timeout 10m
+    - kubectl rollout status deployment/rapids-orchestrator-backend -n rapids
+    - kubectl rollout status deployment/rapids-orchestrator-frontend -n rapids
+  only:
+    - main
+  environment:
+    name: production
+    url: https://rapids.yourcompany.com

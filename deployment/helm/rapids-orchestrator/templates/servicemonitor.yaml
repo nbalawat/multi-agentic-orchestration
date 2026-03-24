@@ -1,0 +1,32 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-backend
+  labels:
+    {{- include "rapids-orchestrator.backend.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "rapids-orchestrator.backend.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+---
+{{- if .Values.postgresql.metrics.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-postgresql
+  labels:
+    {{- include "rapids-orchestrator.postgresql.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "rapids-orchestrator.postgresql.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+{{- end }}
+{{- end }}

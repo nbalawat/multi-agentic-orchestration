@@ -1,0 +1,171 @@
+# Production values for rapids-orchestrator
+# Override default values for production deployment
+
+backend:
+  replicaCount: 3
+  image:
+    repository: your-registry.example.com/rapids-orchestrator/backend
+    tag: "0.1.0"
+    pullPolicy: Always
+
+  resources:
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+
+  env:
+    LOG_LEVEL: info
+    ENVIRONMENT: production
+
+  # IMPORTANT: Set these via --set or encrypted secrets management
+  # secretEnv:
+  #   ANTHROPIC_API_KEY: "sk-ant-..."
+  #   JWT_SECRET_KEY: "your-generated-secret-key"
+
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - rapids-backend
+            topologyKey: kubernetes.io/hostname
+
+frontend:
+  replicaCount: 3
+  image:
+    repository: your-registry.example.com/rapids-orchestrator/frontend
+    tag: "0.1.0"
+    pullPolicy: Always
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - rapids-frontend
+            topologyKey: kubernetes.io/hostname
+
+postgresql:
+  enabled: true
+  auth:
+    # IMPORTANT: Set via --set or encrypted secrets management
+    # password: "your-strong-database-password"
+    password: ""
+
+  primary:
+    resources:
+      limits:
+        cpu: 4000m
+        memory: 16Gi
+      requests:
+        cpu: 2000m
+        memory: 8Gi
+
+    persistence:
+      enabled: true
+      size: 200Gi
+      storageClass: "fast-ssd"
+
+    extraEnvVars:
+      - name: POSTGRES_SHARED_BUFFERS
+        value: "4GB"
+      - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+        value: "12GB"
+      - name: POSTGRES_MAX_CONNECTIONS
+        value: "200"
+      - name: POSTGRES_WORK_MEM
+        value: "16MB"
+      - name: POSTGRES_MAINTENANCE_WORK_MEM
+        value: "512MB"
+
+  metrics:
+    enabled: true
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/websocket-services: "rapids-backend"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/client-max-body-size: "100m"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+
+  hosts:
+    - host: rapids.yourcompany.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          backend: backend
+        - path: /ws
+          pathType: Prefix
+          backend: backend
+        - path: /health
+          pathType: Prefix
+          backend: backend
+        - path: /
+          pathType: Prefix
+          backend: frontend
+
+  tls:
+    - secretName: rapids-tls-prod
+      hosts:
+        - rapids.yourcompany.com
+
+persistence:
+  workspace:
+    enabled: true
+    size: 100Gi
+    storageClass: "fast-ssd"
+    accessMode: ReadWriteMany
+
+  logs:
+    enabled: true
+    size: 50Gi
+    storageClass: "standard"
+    accessMode: ReadWriteMany
+
+networkPolicy:
+  enabled: true
+
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s

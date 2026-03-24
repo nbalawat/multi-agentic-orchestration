@@ -1,0 +1,142 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rapids-orchestrator.fullname" . }}-postgresql
+  labels:
+    {{- include "rapids-orchestrator.postgresql.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "rapids-orchestrator.fullname" . }}-postgresql-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "rapids-orchestrator.postgresql.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.postgresql.primary.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "rapids-orchestrator.postgresql.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rapids-orchestrator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.postgresql.primary.podSecurityContext | nindent 8 }}
+      containers:
+        - name: postgresql
+          securityContext:
+            {{- toYaml .Values.postgresql.primary.securityContext | nindent 12 }}
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rapids-orchestrator.fullname" . }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            {{- with .Values.postgresql.primary.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U {{ .Values.postgresql.auth.username | quote }} -d {{ .Values.postgresql.auth.database | quote }} -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U {{ .Values.postgresql.auth.username | quote }} -d {{ .Values.postgresql.auth.database | quote }} -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgresql.primary.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: dshm
+              mountPath: /dev/shm
+        {{- if .Values.postgresql.metrics.enabled }}
+        - name: metrics
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/$(POSTGRES_DB)?sslmode=disable"
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rapids-orchestrator.fullname" . }}
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.postgresql.metrics.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+  {{- if .Values.postgresql.primary.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "rapids-orchestrator.postgresql.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.postgresql.primary.persistence.storageClass }}
+        {{- if (eq "-" .Values.postgresql.primary.persistence.storageClass) }}
+        storageClassName: ""
+        {{- else }}
+        storageClassName: {{ .Values.postgresql.primary.persistence.storageClass | quote }}
+        {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.primary.persistence.size | quote }}
+  {{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,79 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Documentation
+*.md
+docs/
+.rapids/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+tests/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Frontend
+orchestrator/frontend/node_modules/
+orchestrator/frontend/dist/
+orchestrator/frontend/.nuxt/
+orchestrator/frontend/.output/
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment
+.env
+.env.*
+!.env.sample
+!.env.production.template
+
+# Backups
+backups/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Workspace data (mounted as volume)
+workspace/
