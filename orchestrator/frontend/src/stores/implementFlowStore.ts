@@ -186,8 +186,16 @@ export const useImplementFlowStore = defineStore('implementFlow', () => {
         }
       }
 
-      // Replace entire ref to trigger reactivity
-      features.value = newFeatures
+      // Merge with existing state — preserve 'building' stage from WebSocket events
+      // that may not yet be reflected in the API response
+      const merged = { ...newFeatures }
+      for (const [id, existing] of Object.entries(features.value)) {
+        if (merged[id] && existing.stage === 'building' && merged[id].stage !== 'done') {
+          // Keep the building state + agent assignment from WebSocket
+          merged[id] = { ...merged[id], stage: 'building', assignedAgent: existing.assignedAgent, stageEnteredAt: existing.stageEnteredAt }
+        }
+      }
+      features.value = merged
 
       progress.value = {
         total: dagSummary.total || featureList.length,
