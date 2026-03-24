@@ -117,6 +117,57 @@ async def process_queued_runs(pool):
 
     await asyncio.gather(*[safe_execute(r) for r in runs_to_start])
 
+    # Auto-queue more features if there are ready ones without execution_runs
+    await auto_queue_ready_features(pool)
+
+
+async def auto_queue_ready_features(pool):
+    """Queue any ready features that don't have an execution_run yet."""
+    async with pool.acquire() as conn:
+        # Find features that are planned/ready with no execution_run
+        rows = await conn.fetch("""
+            SELECT f.id, f.name, f.project_id
+            FROM features f
+            LEFT JOIN execution_runs er ON f.id = er.feature_id
+            WHERE er.id IS NULL
+            AND f.status IN ('planned', 'in_progress')
+            AND f.project_id IN (SELECT DISTINCT project_id FROM execution_runs)
+            ORDER BY f.priority ASC
+            LIMIT 10
+        """)
+
+    if not rows:
+        return
+
+    # Check which are actually ready (all deps complete)
+    import httpx
+    backend_url = os.environ.get("BACKEND_URL", "http://127.0.0.1:9403")
+
+    for row in rows:
+        project_id = str(row["project_id"])
+        feature_id = str(row["id"])
+        feature_name = row["name"]
+
+        try:
+            # Check if feature is ready via DAG
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{backend_url}/api/projects/{project_id}/dag", timeout=10.0)
+                dag = resp.json()
+
+            if feature_id not in dag.get("ready_features", []):
+                continue
+
+            # Queue it
+            agent_name = f"builder-{feature_name}"[:40]
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO execution_runs (id, project_id, feature_id, feature_name, agent_name, status) VALUES ($1, $2, $3, $4, $5, 'queued')",
+                    uuid.uuid4(), row["project_id"], row["id"], feature_name, agent_name,
+                )
+            logger.info(f"[AutoQueue] Queued: {feature_name}")
+        except Exception as e:
+            logger.debug(f"[AutoQueue] Skip {feature_name}: {e}")
+
 
 async def execute_single_run(pool, run: Dict[str, Any]):
     """Execute a single feature run using a fresh Claude SDK session."""
