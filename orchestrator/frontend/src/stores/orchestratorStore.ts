@@ -516,16 +516,17 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
   function handleAgentDeleted(message: any) {
     console.log('Agent deleted:', message)
 
-    // Remove agent from array
-    const agentId = message.agent_id
+    // Extract agent_id from either message root or message.data
+    const agentId = message.agent_id || message.data?.agent_id
+    const agentName = message.agent_name || message.data?.agent_name
 
     if (agentId) {
-      const index = agents.value.findIndex(a => a.id === agentId)
-      if (index !== -1) {
-        // Use spread operator to trigger Vue reactivity
-        agents.value = agents.value.filter(a => a.id !== agentId)
-        console.log(`Removed agent ${agentId} from list`)
-      }
+      agents.value = agents.value.filter(a => a.id !== agentId)
+      console.log(`Removed agent ${agentId} from list`)
+    } else if (agentName) {
+      // Fallback: remove by name
+      agents.value = agents.value.filter(a => a.name !== agentName)
+      console.log(`Removed agent '${agentName}' from list by name`)
     }
   }
 
