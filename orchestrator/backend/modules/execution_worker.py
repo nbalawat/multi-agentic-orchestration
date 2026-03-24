@@ -183,6 +183,7 @@ async def execute_single_run(pool, run: Dict[str, Any]):
     try:
         cost_data = await run_sdk_session(prompt, repo_path, feature_name, run_meta={
             "agent_name": agent_name,
+            "agent_id": str(agent_id),
             "project_id": str(run["project_id"]),
             "feature_id": str(run["feature_id"]),
         })
@@ -274,6 +275,7 @@ async def run_sdk_session(prompt: str, cwd: str, feature_name: str, run_meta: Di
 
     backend_url = os.environ.get("BACKEND_URL", "http://127.0.0.1:9403")
     agent_name = run_meta.get("agent_name", f"builder-{feature_name}") if run_meta else f"builder-{feature_name}"
+    agent_id_str = run_meta.get("agent_id", "") if run_meta else ""
     project_id = run_meta.get("project_id", "") if run_meta else ""
 
     options = ClaudeAgentOptions(
@@ -298,16 +300,17 @@ async def run_sdk_session(prompt: str, cwd: str, feature_name: str, run_meta: Di
             async with httpx.AsyncClient() as client:
                 await client.post(f"{backend_url}/api/worker/feature-event", json={
                     "type": "agent_log",
+                    "agent_id": agent_id_str,
                     "agent_name": agent_name,
                     "project_id": project_id,
                     "feature_name": feature_name,
                     "event_type": event_type,
                     "event_category": category,
-                    "content": content[:500],  # Truncate for display
+                    "content": content[:500],
                     "entry_index": event_count,
                 }, timeout=3.0)
         except Exception:
-            pass  # Non-critical
+            pass
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(

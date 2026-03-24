@@ -1519,19 +1519,32 @@ async def worker_feature_event(request: Request):
             await ws_manager.broadcast({"type": "agent_created", "agent": data})
         elif event_type == "agent_log":
             # Stream agent activity to event stream
+            evt_type = data.get("event_type", "text")
+            evt_cat = data.get("event_category", "response")
             await ws_manager.broadcast_agent_log({
                 "id": str(uuid.uuid4()),
                 "agent_id": data.get("agent_id", ""),
                 "agent_name": data.get("agent_name", ""),
                 "task_slug": data.get("feature_name", ""),
                 "entry_index": data.get("entry_index", 0),
-                "event_category": data.get("event_category", "response"),
-                "event_type": data.get("event_type", "text"),
+                "event_category": evt_cat,
+                "event_type": evt_type,
                 "content": data.get("content", ""),
                 "summary": data.get("content", "")[:100],
                 "payload": {},
                 "timestamp": datetime.now().isoformat(),
             })
+            # Also broadcast as thinking_block or tool_use_block for the dedicated panels
+            if evt_cat == "thinking":
+                await ws_manager.broadcast({"type": "thinking_block", "data": {
+                    "agent_name": data.get("agent_name", ""),
+                    "thinking": data.get("content", ""),
+                }})
+            elif evt_cat == "tool_use":
+                await ws_manager.broadcast({"type": "tool_use_block", "data": {
+                    "agent_name": data.get("agent_name", ""),
+                    "tool_name": data.get("content", "").replace("Tool: ", ""),
+                }})
         elif event_type == "feature_started":
             await ws_manager.broadcast({"type": "feature_started", "data": data})
         elif event_type == "feature_completed":
