@@ -108,9 +108,8 @@ class ExecutionEngine:
             for fid in group:
                 feature_waves[fid] = wave_num
 
-        # Start each feature
-        started = []
-        for feature in features_to_run:
+        # Start features concurrently via asyncio.gather (same pattern as old code that worked)
+        async def _safe_start(feature):
             try:
                 run_id = await self._start_feature(
                     project_id=project_id,
@@ -123,15 +122,17 @@ class ExecutionEngine:
                     wave_number=feature_waves.get(feature.id, 0),
                     ctx_mgr=ctx_mgr,
                 )
-                started.append({"feature": feature.name, "run_id": str(run_id)})
+                return {"feature": feature.name, "run_id": str(run_id)}
             except Exception as e:
-                logger.error(f"[ExecutionEngine] Failed to start feature '{feature.name}': {e}")
-                started.append({"feature": feature.name, "error": str(e)})
+                logger.error(f"[ExecutionEngine] Failed to start '{feature.name}': {e}")
+                return {"feature": feature.name, "error": str(e)}
+
+        results = await asyncio.gather(*[_safe_start(f) for f in features_to_run])
 
         return {
-            "started": len([s for s in started if "error" not in s]),
-            "runs": started,
-            "message": f"Started {len(started)} features.",
+            "started": len([r for r in results if "error" not in r]),
+            "runs": list(results),
+            "message": f"Started {len(results)} features.",
         }
 
     async def _start_feature(
