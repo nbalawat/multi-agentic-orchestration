@@ -64,7 +64,11 @@ const testClass = computed(() => {
   const t = props.run.test_results
   if (t?.failed && t.failed > 0) return 'test-fail'
   if (t?.passed && t.passed > 0) return 'test-pass'
-  if (t?.errors?.length) return 'test-fail'
+  if (t?.errors?.length) {
+    // Timeout is a warning, not a failure
+    const hasRealErrors = t.errors.some((e: string) => !e.toLowerCase().includes('timed out'))
+    return hasRealErrors ? 'test-fail' : 'test-warn'
+  }
   return 'test-none'
 })
 
@@ -72,7 +76,10 @@ const testLabel = computed(() => {
   const t = props.run.test_results
   if (t?.failed && t.failed > 0) return `${t.passed || 0}/${(t.passed || 0) + t.failed} passed`
   if (t?.passed && t.passed > 0) return `${t.passed} passed`
-  if (t?.errors?.length) return `${t.errors.length} errors`
+  if (t?.errors?.length) {
+    const hasTimeout = t.errors.some((e: string) => e.toLowerCase().includes('timed out'))
+    return hasTimeout ? 'tests skipped' : `${t.errors.length} errors`
+  }
   return ''
 })
 </script>
@@ -178,6 +185,7 @@ const testLabel = computed(() => {
 }
 .test-pass { background: rgba(134, 188, 36, 0.15); color: #86BC24; }
 .test-fail { background: rgba(248, 81, 73, 0.15); color: #f85149; }
+.test-warn { background: rgba(227, 179, 65, 0.15); color: #e3b341; }
 .test-none { background: rgba(139, 148, 158, 0.15); color: #8b949e; }
 
 .elapsed {

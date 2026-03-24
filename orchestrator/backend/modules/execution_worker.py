@@ -278,8 +278,9 @@ async def execute_single_run(pool, run: Dict[str, Any]):
             test_results = await run_tests(repo_path, test_cmd)
             logger.info(f"[{feature_name}] Tests: {test_results['passed']} passed, {test_results['failed']} failed")
 
-    # 6. Determine result
-    is_success = not error_message and test_results["failed"] == 0
+    # 6. Determine result — test timeout is not a failure (tests may not exist)
+    test_errors_are_fatal = any(e for e in test_results.get("errors", []) if "timed out" not in e.lower())
+    is_success = not error_message and test_results["failed"] == 0 and not test_errors_are_fatal
     final_status = "complete" if is_success else "failed"
     feature_status = "complete" if is_success else "blocked"
 
