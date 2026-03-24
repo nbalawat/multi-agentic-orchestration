@@ -5,6 +5,7 @@ Centralize agent lifecycle management, tool registration, and background executi
 Implements 20 management tools for the orchestrator agent (8 core + 12 RAPIDS).
 """
 
+import json
 import threading
 import asyncio
 import uuid
@@ -201,6 +202,12 @@ class AgentManager:
                 "session_id": agent_data.get("session_id"),
                 "metadata": metadata,
             })
+
+            # Rebuild builder registry from persisted metadata
+            builder_info = metadata.get("builder_info")
+            if builder_info and agent_data.get("name", "").startswith("builder-"):
+                self._builder_registry[agent_data["name"]] = builder_info
+                self.logger.info(f"Restored builder registry: {agent_data['name']} → feature {builder_info.get('feature_name', '?')}")
 
         return recovered
 
@@ -1534,7 +1541,7 @@ class AgentManager:
                         entry["status"] = "dispatched"
 
                         # Register builder for auto-merge on completion
-                        self._builder_registry[entry["agent"]] = {
+                        builder_info = {
                             "feature_id": entry["feature_id"],
                             "feature_name": entry["feature"],
                             "project_id": project_id,
@@ -1542,7 +1549,20 @@ class AgentManager:
                             "worktree_path": worktree_path or "",
                             "worktree_branch": worktree_branch or "",
                         }
+                        self._builder_registry[entry["agent"]] = builder_info
                         self.logger.info(f"Registered builder '{entry['agent']}' for auto-merge (feature={entry['feature_id']}, branch={worktree_branch})")
+
+                        # Persist builder info to agent metadata for crash recovery
+                        try:
+                            from .database import get_connection
+                            async with get_connection() as conn:
+                                await conn.execute(
+                                    "UPDATE agents SET metadata = metadata || $1::jsonb WHERE id = $2",
+                                    json.dumps({"builder_info": builder_info}),
+                                    uuid.UUID(agent_id_for_dispatch),
+                                )
+                        except Exception:
+                            pass  # Non-critical — in-memory registry is primary
 
                     except Exception as e:
                         entry["status"] = f"error: {str(e)}"
